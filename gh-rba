@@ -1,0 +1,270 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION="0.1.0"
+CONFIG_FILE=".rba"
+ORG=""
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+die()  { echo "Error: $*" >&2; exit 1; }
+info() { echo "→ $*"; }
+
+load_config() {
+  if [[ -f "$CONFIG_FILE" ]]; then source "$CONFIG_FILE"; fi
+}
+
+require_org() {
+  [[ -n "$ORG" ]] || die "No org configured. Run 'gh rba init --org <org>' or pass --org <org>"
+  echo "$ORG"
+}
+
+# Read student roster — supports "username" or "username,Full Name" per line.
+# Blank lines and lines starting with # are ignored.
+# Outputs: one "username,Full Name" per line (Full Name may be empty)
+read_roster() {
+  local file="$1"
+  [[ -f "$file" ]] || die "Roster file not found: $file"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line//$'\r'/}"          # strip Windows CR
+    [[ "$line" =~ ^[[:space:]]*#  ]] && continue
+    [[ -z "${line// }"            ]] && continue
+    echo "$line"
+  done < "$file"
+}
+
+# ── Commands ──────────────────────────────────────────────────────────────────
+
+cmd_init() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --org) ORG="$2"; shift 2 ;;
+      *) die "Unknown option: $1" ;;
+    esac
+  done
+  [[ -n "$ORG" ]] || die "Usage: gh rba init --org <org>"
+  echo "ORG=$ORG" > "$CONFIG_FILE"
+  info "Initialized: org=$ORG (saved to $CONFIG_FILE)"
+}
+
+cmd_assignment_create() {
+  load_config
+  local name="" template="" students_file=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name)     name="$2";         shift 2 ;;
+      --template) template="$2";     shift 2 ;;
+      --students) students_file="$2"; shift 2 ;;
+      --org)      ORG="$2";          shift 2 ;;
+      *) die "Unknown option: $1" ;;
+    esac
+  done
+
+  [[ -n "$name"          ]] || die "Usage: gh rba assignment create --name <name> --template <org/repo> --students <file>"
+  [[ -n "$template"      ]] || die "--template <org/repo> is required"
+  [[ -n "$students_file" ]] || die "--students <file> is required"
+
+  local org
+  org=$(require_org)
+
+  # Verify the template repo exists and has "Template repository" enabled
+  local is_template
+  is_template=$(gh api "repos/$template" --jq '.is_template' 2>/dev/null) \
+    || die "Template repo '$template' not found or not accessible"
+  [[ "$is_template" == "true" ]] \
+    || die "'$template' is not marked as a template repo. Enable it under Settings → General → 'Template repository'."
+
+  info "Creating assignment '$name' in org '$org' from template '$template'"
+
+  while IFS=',' read -r username fullname; do
+    username="${username// /}"
+    local repo_name="${name}-${username}"
+
+    info "  $username → $org/$repo_name"
+
+    if gh repo create "$org/$repo_name" \
+        --template "$template" \
+        --private 2>/dev/null; then
+
+      # Tag with assignment topics
+      gh api --method PUT "repos/$org/$repo_name/topics" \
+        --field 'names[]=rba-assignment' \
+        --field "names[]=rba-assignment-${name}" > /dev/null
+
+      # Add student as outside collaborator (write access)
+      gh api --method PUT "repos/$org/$repo_name/collaborators/$username" \
+        --field permission=push > /dev/null
+
+      echo "    ✓ created, $username added as collaborator"
+    else
+      echo "    ⚠ skipped (repo may already exist)" >&2
+    fi
+  done < <(read_roster "$students_file")
+
+  info "Done. Assignment '$name' created."
+}
+
+cmd_assignment_list() {
+  load_config
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --org) ORG="$2"; shift 2 ;;
+      *) die "Unknown option: $1" ;;
+    esac
+  done
+
+  local org
+  org=$(require_org)
+
+  info "Assignments in org '$org':"
+
+  gh api "search/repositories?q=topic:rba-assignment+org:${org}&per_page=100" \
+    --jq '.items[].topics[]' \
+    | grep '^rba-assignment-' \
+    | sed 's/^rba-assignment-//' \
+    | sort -u
+}
+
+cmd_repos_clone() {
+  load_config
+  [[ $# -gt 0 ]] || die "Usage: gh rba repos clone <assignment-name> [--org <org>]"
+  local assignment_name="$1"; shift
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --org) ORG="$2"; shift 2 ;;
+      *) die "Unknown option: $1" ;;
+    esac
+  done
+
+  local org
+  org=$(require_org)
+
+  local repos
+  repos=$(gh api \
+    "search/repositories?q=topic:rba-assignment-${assignment_name}+org:${org}&per_page=100" \
+    --jq '.items[].full_name')
+
+  [[ -n "$repos" ]] || die "No repos found for assignment '$assignment_name' in org '$org'"
+
+  mkdir -p "$assignment_name"
+  info "Cloning into ./$assignment_name/"
+
+  while IFS= read -r full_name; do
+    local repo_name="${full_name#*/}"
+    local username="${repo_name#"${assignment_name}-"}"
+    local clone_dir="${assignment_name}/${username}"
+
+    if [[ -d "$clone_dir" ]]; then
+      echo "  skipping $username (already cloned)"
+    else
+      info "  $full_name → $clone_dir"
+      gh repo clone "$full_name" "$clone_dir" -- --quiet
+    fi
+  done <<< "$repos"
+
+  info "Done."
+}
+
+cmd_repos_report() {
+  load_config
+  [[ $# -gt 0 ]] || die "Usage: gh rba repos report <assignment-name> [--org <org>]"
+  local assignment_name="$1"; shift
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --org) ORG="$2"; shift 2 ;;
+      *) die "Unknown option: $1" ;;
+    esac
+  done
+
+  local org
+  org=$(require_org)
+
+  local repos_json
+  repos_json=$(gh api \
+    "search/repositories?q=topic:rba-assignment-${assignment_name}+org:${org}&per_page=100")
+
+  local count
+  count=$(echo "$repos_json" | jq '.total_count')
+  [[ "$count" -gt 0 ]] || die "No repos found for assignment '$assignment_name' in org '$org'"
+
+  local output_file="${assignment_name}-report.md"
+
+  {
+    echo "# Assignment: ${assignment_name}"
+    echo ""
+    echo "Org: \`${org}\`  "
+    echo "Generated: $(date '+%Y-%m-%d %H:%M')"
+    echo ""
+    echo "| Student | Repository | Last Push |"
+    echo "|---------|------------|-----------|"
+
+    echo "$repos_json" \
+      | jq -r '.items[] | [.name, .html_url, .pushed_at] | @tsv' \
+      | while IFS=$'\t' read -r repo_name html_url pushed_at; do
+          local username="${repo_name#"${assignment_name}-"}"
+          echo "| ${username} | [${repo_name}](${html_url}) | ${pushed_at:0:10} |"
+        done
+  } > "$output_file"
+
+  info "Report written to $output_file ($count repos)"
+}
+
+# ── Usage ─────────────────────────────────────────────────────────────────────
+
+usage() {
+  cat <<EOF
+gh-rba v${VERSION} — R.B. Annis School of Engineering GitHub Tools
+
+USAGE
+  gh rba init --org <org>
+  gh rba assignment create --name <name> --template <org/repo> --students <file> [--org <org>]
+  gh rba assignment list [--org <org>]
+  gh rba repos clone <assignment-name> [--org <org>]
+  gh rba repos report <assignment-name> [--org <org>]
+
+CONFIG
+  Run 'gh rba init --org <org>' in your course directory to save a default org.
+  All commands accept --org to override the default.
+
+ROSTER FORMAT
+  Plain text (one GitHub username per line) or CSV (username,Full Name).
+  Lines starting with # and blank lines are ignored.
+
+NOTES
+  The template repo must have "Template repository" enabled in its GitHub settings.
+  Student repos are created private and named <assignment-name>-<username>.
+  Each student is added as an outside collaborator with write access.
+EOF
+  exit 0
+}
+
+# ── Dispatch ──────────────────────────────────────────────────────────────────
+
+[[ $# -eq 0 ]] && usage
+
+case "$1" in
+  init)    shift; cmd_init "$@" ;;
+  assignment)
+    shift
+    [[ $# -gt 0 ]] || usage
+    case "$1" in
+      create) shift; cmd_assignment_create "$@" ;;
+      list)   shift; cmd_assignment_list "$@" ;;
+      *)      usage ;;
+    esac
+    ;;
+  repos)
+    shift
+    [[ $# -gt 0 ]] || usage
+    case "$1" in
+      clone)  shift; cmd_repos_clone "$@" ;;
+      report) shift; cmd_repos_report "$@" ;;
+      *)      usage ;;
+    esac
+    ;;
+  version|--version) echo "gh-rba v${VERSION}" ;;
+  help|--help|-h)    usage ;;
+  *) die "Unknown command: $1. Run 'gh rba help' for usage." ;;
+esac
