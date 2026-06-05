@@ -27,7 +27,7 @@ gh extension install /path/to/gh-rba
 
 **Assignment.** A named set of student repos created from a single template repo. Repos are named `<assignment-name>-<github-username>` and tagged with GitHub topics so the tool can find them later.
 
-**Template repo.** A GitHub repo with "Template repository" enabled (Settings → General → Template repository). When an assignment is created, each student gets a private copy with a clean git history. Templates can live in any org the instructor has access to.
+**Template repo.** A GitHub repo with "Template repository" enabled (Settings → General → Template repository). When an assignment is created, each student gets a private copy with a clean git history. Templates live alongside student repos in the course org — an org like `202520-EENG-340` might contain several template repos, one per assignment.
 
 **Roster.** A plain-text file listing the GitHub usernames of your students.
 
@@ -35,11 +35,11 @@ gh extension install /path/to/gh-rba
 
 ## Setup
 
-Create a GitHub org for your course inside the UIndy enterprise, then run once per course directory to save it as the default:
+Create a GitHub org for your course inside the UIndy enterprise (e.g. `202520-EENG-340`), then run once per course directory to save it as the default:
 
 ```bash
-cd ~/courses/ece101-fall26
-gh rba init --org my-ece101-fall26
+cd ~/courses/202520-EENG-340
+gh rba init --org 202520-EENG-340
 ```
 
 This writes a `.rba` file in the current directory. All subsequent commands run from this directory will use that org as the default. Any command also accepts `--org <org>` to override.
@@ -49,7 +49,7 @@ This writes a `.rba` file in the current directory. All subsequent commands run 
 A plain text file, one GitHub username per line:
 
 ```
-# ece101-fall26.txt
+# roster.txt
 jsmith42
 mjones99
 alee2026
@@ -90,7 +90,7 @@ Creates a private repo for every student in the roster by copying the template, 
 | Flag | Description |
 |------|-------------|
 | `--name` | Assignment name, e.g. `lab1`. Used as a prefix for all student repo names. |
-| `--template` | Full name of the template repo, e.g. `UINDY-INSTRUCTORS/lab1-starter`. Must have "Template repository" enabled. |
+| `--template` | Full name of the template repo, e.g. `202520-EENG-340/lab1-starter`. Must have "Template repository" enabled. |
 | `--students` | Path to the roster file. |
 | `--org` | Override the default org (where student repos will be created). |
 
@@ -99,7 +99,7 @@ Creates a private repo for every student in the roster by copying the template, 
 ```bash
 gh rba assignment create \
   --name lab1 \
-  --template UINDY-INSTRUCTORS/lab1-starter \
+  --template 202520-EENG-340/lab1-starter \
   --students roster.txt
 ```
 
@@ -110,9 +110,9 @@ Creates repos named `lab1-jsmith42`, `lab1-mjones99`, etc. in the default org.
 ```bash
 gh rba assignment create \
   --name lab1 \
-  --template UINDY-INSTRUCTORS/lab1-starter \
+  --template 202520-EENG-340/lab1-starter \
   --students roster.txt \
-  --org my-ece101-fall26
+  --org 202520-EENG-340
 ```
 
 **Template repo setup:** In the template repo's GitHub settings, go to Settings → General and check the "Template repository" box. The tool will verify this before creating any repos and exit with a clear error if it is not set.
@@ -130,7 +130,7 @@ Lists all assignments that have been created in the org, by searching for repos 
 **Example output:**
 
 ```
-→ Assignments in org 'my-ece101-fall26':
+→ Assignments in org '202520-EENG-340':
 lab1
 lab2
 midterm-project
@@ -176,27 +176,27 @@ Generates a Markdown file named `<assignment-name>-report.md` with a table of ev
 ```markdown
 # Assignment: lab1
 
-Org: `my-ece101-fall26`
+Org: `202520-EENG-340`
 Generated: 2026-06-02 14:30
 
 | Student | Repository | Last Push |
 |---------|------------|-----------|
-| jsmith42 | [lab1-jsmith42](https://github.com/my-ece101-fall26/lab1-jsmith42) | 2026-05-30 |
-| mjones99 | [lab1-mjones99](https://github.com/my-ece101-fall26/lab1-mjones99) | 2026-05-29 |
-| alee2026 | [lab1-alee2026](https://github.com/my-ece101-fall26/lab1-alee2026) | 2026-05-31 |
+| jsmith42 | [lab1-jsmith42](https://github.com/202520-EENG-340/lab1-jsmith42) | 2026-05-30 |
+| mjones99 | [lab1-mjones99](https://github.com/202520-EENG-340/lab1-mjones99) | 2026-05-29 |
+| alee2026 | [lab1-alee2026](https://github.com/202520-EENG-340/lab1-alee2026) | 2026-05-31 |
 ```
 
 ## Typical Workflow
 
 ```bash
 # 1. Set up your course directory
-cd ~/courses/ece101-fall26
-gh rba init --org my-ece101-fall26
+cd ~/courses/202520-EENG-340
+gh rba init --org 202520-EENG-340
 
 # 2. Distribute an assignment
 gh rba assignment create \
   --name lab1 \
-  --template UINDY-INSTRUCTORS/lab1-starter \
+  --template 202520-EENG-340/lab1-starter \
   --students roster.txt
 
 # 3. Check what assignments exist
