@@ -4,6 +4,18 @@
 **Status:** Approved, ready for implementation planning
 **Supersedes:** the "Patching assignments after creation" section of `FUTURE.md`
 
+> **Corrections applied during final review (2026-08-10).** The examples below use
+> `hw01-java-intro-template` alongside `gh rba assignment patch hw01`; the stated
+> `<org>/<assignment-name>-template` default resolves that to `hw01-template`, so
+> those examples only work with an explicit `--template`. `README.md` now uses
+> `lab1` / `lab1-template` consistently. Two further guards were added beyond this
+> spec's algorithm, both required to keep "student work is preserved" true:
+> the student's root **tree** must appear in the template's history (one root
+> commit alone is not sufficient — a squashed history also has one root), and
+> `repos/<repo>.template_repository.full_name` must match the resolved template
+> (the `--template` default is a naming guess, and `create` records the linkage
+> nowhere). See `.superpowers/sdd/2026-08-10-assignment-patch/final-fix-report.md`.
+
 ## Problem
 
 `gh rba assignment create` distributes a template repo to N students as independent

@@ -90,7 +90,7 @@ Creates a private repo for every student in the roster by copying the template, 
 | Flag | Description |
 |------|-------------|
 | `--name` | Assignment name, e.g. `lab1`. Used as a prefix for all student repo names. |
-| `--template` | Full name of the template repo, e.g. `202520-EENG-340/lab1-starter`. Must have "Template repository" enabled. |
+| `--template` | Full name of the template repo, e.g. `202520-EENG-340/lab1-template`. Must have "Template repository" enabled. |
 | `--students` | Path to the roster file. |
 | `--org` | Override the default org (where student repos will be created). |
 
@@ -99,57 +99,28 @@ Creates a private repo for every student in the roster by copying the template, 
 ```bash
 gh rba assignment create \
   --name lab1 \
-  --template 202520-EENG-340/lab1-starter \
+  --template 202520-EENG-340/lab1-template \
   --students roster.txt
 ```
 
 Creates repos named `lab1-jsmith42`, `lab1-mjones99`, etc. in the default org.
+
+**Naming your template `<name>-template` matters.** `assignment patch` looks for
+`<org>/<assignment-name>-template` by default, so a template named `lab1-template`
+lets you later run `gh rba assignment patch lab1` with no extra flags. Any other
+name works too — you just have to pass `--template` to `patch` every time.
 
 **Note:** The template org and the destination org can differ. This is useful if you keep templates in a shared org and create student repos in a course-specific org:
 
 ```bash
 gh rba assignment create \
   --name lab1 \
-  --template 202520-EENG-340/lab1-starter \
+  --template 202520-EENG-340/lab1-template \
   --students roster.txt \
   --org 202520-EENG-340
 ```
 
 **Template repo setup:** In the template repo's GitHub settings, go to Settings → General and check the "Template repository" box. The tool will verify this before creating any repos and exit with a clear error if it is not set.
-
----
-
-### Patching a distributed assignment
-
-Fix the template repo as normal, then push the fix to every student repo:
-
-```bash
-cd hw01-java-intro-template
-vim .github/workflows/test.yml
-git commit -am "fix JUnit jar path"
-git push
-
-gh rba assignment patch hw01 --dry-run   # preview
-gh rba assignment patch hw01             # do it
-```
-
-Each student repo is merged three ways: its own root commit (the snapshot it was
-created from) is the merge base, its current branch is "ours", and the template
-is "theirs". Student work is preserved. A repo whose student edited the same
-lines you fixed is **left completely untouched** and reported at the end for you
-to handle by hand.
-
-Patching is idempotent — re-running reports "already up to date", so an
-interrupted run is safe to resume.
-
-| Flag | Default | Meaning |
-|------|---------|---------|
-| `--template <org/repo>` | `<org>/<assignment>-template` | Where the fix comes from |
-| `--message <msg>` | `Instructor patch: sync from template` | Commit message |
-| `--dry-run` | off | Run every merge, push nothing |
-| `--yes`, `-y` | off | Skip the confirmation prompt |
-
-Requires git >= 2.38.
 
 ---
 
@@ -169,6 +140,81 @@ lab1
 lab2
 midterm-project
 ```
+
+---
+
+### `gh rba assignment patch`
+
+```
+gh rba assignment patch <assignment-name> [--template <org/repo>] [--message <msg>]
+                                          [--dry-run] [--yes|-y] [--org <org>]
+```
+
+Fix the template repo as normal, then push the fix to every student repo:
+
+```bash
+cd lab1-template
+vim .github/workflows/test.yml
+git commit -am "fix JUnit jar path"
+git push
+
+gh rba assignment patch lab1 --dry-run   # preview
+gh rba assignment patch lab1             # do it
+```
+
+Each student repo is merged three ways: its own root commit (the snapshot it was
+created from) is the merge base, its current branch is "ours", and the template
+is "theirs". Student work is preserved. A repo whose student edited the same
+lines you fixed is **left completely untouched** and reported at the end for you
+to handle by hand.
+
+Patching is idempotent — re-running reports "already up to date", so an
+interrupted run is safe to resume.
+
+**Options:**
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--template <org/repo>` | `<org>/<assignment-name>-template` | Where the fix comes from. Pass this whenever the template is not named `<assignment-name>-template`. |
+| `--message <msg>` | `Instructor patch: sync from template` | Commit message on student repos |
+| `--dry-run` | off | Run every merge, print outcomes, push nothing |
+| `--yes`, `-y` | off | Skip the confirmation prompt |
+| `--org <org>` | from `.rba` | Override the default org |
+
+**Example output:**
+
+```
+→ Patching 'lab1' in org '202520-EENG-340' from '202520-EENG-340/lab1-template'
+
+  ✓ mjones99             applied
+  ─ jsmith42             already up to date
+  ⚠ kpatel7              CONFLICT (skipped)
+
+1 applied, 1 up to date, 1 conflict, 0 skipped
+
+Needs manual attention:
+  kpatel7  src/Tokenizer.java
+```
+
+**Exit code.** The command exits **non-zero** whenever any repo conflicted or was
+skipped, and zero only when every repo was applied or already up to date. This
+applies to `--dry-run` too, which is what makes a dry run usable as a pre-flight
+check in a script.
+
+**Repos that get skipped rather than patched.** `patch` refuses to merge unless it
+can prove the student repo really is an instance of this template:
+
+| Skip reason | Meaning |
+|------|---------|
+| `GitHub records no template for this repo` | GitHub has no `template_repository` link — provenance cannot be verified |
+| `created from a different template (...)` | The repo was instantiated from some other template |
+| `root commit is not a snapshot of this template` | History was rewritten (squashed/orphaned), so the root commit is no longer the distribution snapshot |
+| `N root commits, merge base is ambiguous` | Unrelated history was merged in |
+| `no branch '<branch>': ...` | Fetch failed — the repo is empty, or authentication/network failed. git's own message is appended |
+
+Every skip leaves the repo **completely untouched**. Fix those few by hand.
+
+Requires git >= 2.38.
 
 ---
 
@@ -230,16 +276,21 @@ gh rba init --org 202520-EENG-340
 # 2. Distribute an assignment
 gh rba assignment create \
   --name lab1 \
-  --template 202520-EENG-340/lab1-starter \
+  --template 202520-EENG-340/lab1-template \
   --students roster.txt
 
 # 3. Check what assignments exist
 gh rba assignment list
 
-# 4. At the deadline — clone all submissions
+# 4. Found a mistake in the starter code? Fix the template, then push the fix
+#    to everyone. --dry-run first; a non-zero exit means someone needs a hand.
+gh rba assignment patch lab1 --dry-run
+gh rba assignment patch lab1
+
+# 5. At the deadline — clone all submissions
 gh rba repos clone lab1
 
-# 5. Generate a report with links for quick review
+# 6. Generate a report with links for quick review
 gh rba repos report lab1
 ```
 
