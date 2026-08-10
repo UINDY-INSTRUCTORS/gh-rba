@@ -36,8 +36,8 @@ rba_require_git_version() {
 # global value would produce URLs that fail to authenticate.
 rba_git_protocol() {
   local p
-  p=$(gh config get -h github.com git_protocol 2>/dev/null)
-  [[ -n "$p" ]] || p=$(gh config get git_protocol 2>/dev/null)
+  p=$(gh config get -h github.com git_protocol 2>/dev/null || true)
+  [[ -n "$p" ]] || p=$(gh config get git_protocol 2>/dev/null || true)
   echo "$p"
 }
 
