@@ -237,8 +237,9 @@ cmd_assignment_patch() {
   local name="" template="" message="Instructor patch: sync from template"
   local dry_run=false assume_yes=false
 
-  [[ $# -gt 0 ]] || die "Usage: gh rba assignment patch <assignment-name> [--template <org/repo>] [--message <msg>] [--dry-run] [--yes]"
+  [[ $# -gt 0 ]] || die "Usage: gh rba assignment patch <assignment-name> [--template <org/repo>] [--message <msg>] [--dry-run] [--yes|-y]"
   name="$1"; shift
+  [[ "$name" != -* ]] || die "Usage: gh rba assignment patch <assignment-name> [--template <org/repo>] [--message <msg>] [--dry-run] [--yes|-y]"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -280,10 +281,23 @@ cmd_assignment_patch() {
     [[ "$reply" == "y" || "$reply" == "Y" ]] || die "Aborted."
   fi
 
-  local proto scratch
+  local proto
   proto=$(rba_git_protocol)
+  # $scratch is deliberately NOT `local`: the EXIT trap below fires when the
+  # whole shell exits, which is after this function has returned and any
+  # `local` would have been popped — under `set -u` that would make
+  # "$scratch" an unbound-variable error instead of a cleanup. ${scratch:-}
+  # is a second layer of the same guard in case this ever runs before
+  # $scratch is assigned.
+  #
+  # EXIT traps are also global, not per-function-frame, and this one
+  # unconditionally overwrites any trap already installed by the caller's
+  # shell — e.g. tests/test-patch.sh installs its own `trap ... EXIT` on its
+  # $TMP fixture dir. No current test sources gh-rba and then calls
+  # cmd_assignment_patch in the same shell, so this is latent today, but a
+  # future test that does will silently lose that fixture cleanup.
   scratch=$(mktemp -d)
-  trap 'rm -rf "$scratch"' EXIT
+  trap 'rm -rf "${scratch:-}"' EXIT
 
   git init -q --bare "$scratch"
   local tpl_url
@@ -429,7 +443,7 @@ USAGE
   gh rba init --org <org>
   gh rba assignment create --name <name> --template <org/repo> --students <file> [--org <org>]
   gh rba assignment list [--org <org>]
-  gh rba assignment patch <assignment-name> [--template <org/repo>] [--message <msg>] [--dry-run] [--yes] [--org <org>]
+  gh rba assignment patch <assignment-name> [--template <org/repo>] [--message <msg>] [--dry-run] [--yes|-y] [--org <org>]
   gh rba repos clone <assignment-name> [--org <org>]
   gh rba repos report <assignment-name> [--org <org>]
 

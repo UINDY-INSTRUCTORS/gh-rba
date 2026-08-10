@@ -147,7 +147,7 @@ interrupted run is safe to resume.
 | `--template <org/repo>` | `<org>/<assignment>-template` | Where the fix comes from |
 | `--message <msg>` | `Instructor patch: sync from template` | Commit message |
 | `--dry-run` | off | Run every merge, push nothing |
-| `--yes` | off | Skip the confirmation prompt |
+| `--yes`, `-y` | off | Skip the confirmation prompt |
 
 Requires git >= 2.38.
 
@@ -255,5 +255,4 @@ Student repos are tagged with two GitHub topics at creation time:
 ## Limitations
 
 - **100-student cap per assignment.** GitHub's search API returns up to 100 results. This covers all current class sizes; pagination can be added if needed.
-- **No mid-assignment updates.** Because student repos are independent copies (not forks), there is no built-in way to push a correction to all student repos after creation. A future `gh rba assignment patch` command could address this.
 - **Template must be accessible.** The authenticated `gh` user must have read access to the template repo, and write access to the destination org.
