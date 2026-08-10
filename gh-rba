@@ -31,6 +31,21 @@ rba_require_git_version() {
     || die "git >= 2.38 is required for 'assignment patch' (found $v)."
 }
 
+# Effective git protocol for github.com. Host-scoped config wins over global —
+# a machine can be globally https while github.com is ssh, and reading only the
+# global value would produce URLs that fail to authenticate.
+rba_git_protocol() {
+  local p
+  p=$(gh config get -h github.com git_protocol 2>/dev/null)
+  [[ -n "$p" ]] || p=$(gh config get git_protocol 2>/dev/null)
+  echo "$p"
+}
+
+# Pick the clone/push URL matching the configured protocol.
+rba_remote_url() {  # $1 ssh_url, $2 clone_url, $3 protocol
+  if [[ "$3" == "ssh" ]]; then echo "$1"; else echo "$2"; fi
+}
+
 load_config() {
   if [[ -f "$CONFIG_FILE" ]]; then source "$CONFIG_FILE"; fi
 }

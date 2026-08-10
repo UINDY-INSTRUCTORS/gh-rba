@@ -30,6 +30,13 @@ check "2.37.9 rejected"               too-old "$(version_result 2.37.9)"
 check "2.9.5 rejected (not 2.90)"     too-old "$(version_result 2.9.5)"
 check "1.9.1 rejected"                too-old "$(version_result 1.9.1)"
 
+echo "rba_remote_url:"
+SSH_U="git@github.com:org/repo.git"
+HTTPS_U="https://github.com/org/repo.git"
+check "ssh protocol selects ssh_url"     "$SSH_U"   "$(rba_remote_url "$SSH_U" "$HTTPS_U" ssh)"
+check "https protocol selects clone_url" "$HTTPS_U" "$(rba_remote_url "$SSH_U" "$HTTPS_U" https)"
+check "unknown protocol defaults https"  "$HTTPS_U" "$(rba_remote_url "$SSH_U" "$HTTPS_U" '')"
+
 if (( FAILS == 0 )); then
   echo "test-helpers: PASS"
 else
