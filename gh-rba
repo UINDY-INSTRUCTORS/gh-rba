@@ -337,11 +337,20 @@ cmd_assignment_patch() {
   org=$(require_org)
   [[ -n "$template" ]] || template="${org}/${name}-template"
 
-  # One API call for everything needed about the template.
-  local tpl_json tpl_branch
-  tpl_json=$(gh api "repos/$template" 2>/dev/null) \
-    || die "Template repo '$template' not found. Pass --template <org/repo> if it is named differently."
+  # One API call for everything needed about the template. Keep gh's own error
+  # text: "not found", "rate limit exceeded", "SAML enforcement" and "bad
+  # credentials" all arrive here and need different fixes.
+  local tpl_json tpl_branch tpl_full tpl_errf
+  tpl_errf=$(mktemp)
+  if ! tpl_json=$(gh api "repos/$template" 2>"$tpl_errf"); then
+    local tpl_err
+    tpl_err=$(rba_first_err "$tpl_errf")
+    rm -f "$tpl_errf"
+    die "Could not read template repo '$template'${tpl_err}. Pass --template <org/repo> if it is named differently."
+  fi
+  rm -f "$tpl_errf"
   tpl_branch=$(echo "$tpl_json" | jq -r '.default_branch')
+  tpl_full=$(echo "$tpl_json" | jq -r '.full_name')
 
   local repos_json count
   repos_json=$(gh api "search/repositories?q=topic:rba-assignment-${name}+org:${org}&per_page=100")
@@ -362,6 +371,12 @@ cmd_assignment_patch() {
 
   local proto
   proto=$(rba_git_protocol)
+
+  # An HTTPS remote with no credential helper otherwise opens an interactive
+  # username/password prompt on /dev/tty — once per repo, and NOT suppressed by
+  # redirecting stderr. Fail fast instead.
+  export GIT_TERMINAL_PROMPT=0
+
   # $scratch is deliberately NOT `local`: the EXIT trap below fires when the
   # whole shell exits, which is after this function has returned and any
   # `local` would have been popped — under `set -u` that would make
@@ -377,6 +392,10 @@ cmd_assignment_patch() {
   # future test that does will silently lose that fixture cleanup.
   scratch=$(mktemp -d)
   trap 'rm -rf "${scratch:-}"' EXIT
+  # Ctrl-C and SIGTERM do not fire an EXIT trap on their own; without these the
+  # scratch bare repo (a full copy of the template's objects) is leaked.
+  trap 'rm -rf "${scratch:-}"; exit 130' INT
+  trap 'rm -rf "${scratch:-}"; exit 143' TERM
 
   git init -q --bare "$scratch"
   local tpl_url
@@ -388,40 +407,85 @@ cmd_assignment_patch() {
     "+refs/heads/${tpl_branch}:refs/rba/template" \
     || die "Could not fetch template branch '$tpl_branch' from $template"
 
+  # Every student's root tree must match one of these. Walked once, not 34 times.
+  local tpl_trees
+  tpl_trees=$(rba_template_trees "$scratch")
+
   local n_applied=0 n_uptodate=0 n_conflict=0 n_skipped=0
   local problems=""
+  local applied_word="applied"
+  if [[ "$dry_run" == "true" ]]; then applied_word="would apply"; fi
 
   echo ""
-  while IFS=$'\t' read -r repo_name ssh_url clone_url def_branch; do
+  while IFS=$'\t' read -r repo_name ssh_url clone_url def_branch full_name; do
     local username="${repo_name#"${name}-"}"
-    local url outcome
+    local url outcome prov prov_errf prov_rc
     url=$(rba_remote_url "$ssh_url" "$clone_url" "$proto")
-    outcome=$(rba_patch_repo "$scratch" "$url" "$def_branch" "$message" "$dry_run")
+
+    # `--template <org/repo>` is a naming guess and `assignment create` records
+    # the linkage nowhere locally, so ask GitHub which template this repo was
+    # actually instantiated from before merging an unrelated tree into it.
+    # One extra REST call per repo.
+    prov_errf="${scratch}/.rba-gh-stderr"
+    prov_rc=0
+    prov=$(gh api "repos/${full_name}" --jq '.template_repository.full_name // ""' \
+             2>"$prov_errf") || prov_rc=$?
+
+    if [[ "$prov_rc" != "0" ]]; then
+      outcome="skipped could not verify template provenance$(rba_first_err "$prov_errf")"
+    elif [[ -z "$prov" ]]; then
+      # Never merge on unverifiable provenance — a repo with no recorded
+      # template is not known to share the distribution snapshot.
+      outcome="skipped GitHub records no template for this repo"
+    elif [[ "$(rba_lower "$prov")" != "$(rba_lower "$tpl_full")" ]]; then
+      outcome="skipped created from a different template ($prov)"
+    else
+      outcome=$(rba_patch_repo "$scratch" "$url" "$def_branch" "$message" \
+                  "$dry_run" "$tpl_trees")
+    fi
 
     case "$outcome" in
       applied)
-        printf '  ✓ %-20s applied\n' "$username"; n_applied=$((n_applied + 1)) ;;
+        printf '  ✓ %-20s %s\n' "$username" "$applied_word"
+        n_applied=$((n_applied + 1)) ;;
       uptodate)
         printf '  ─ %-20s already up to date\n' "$username"; n_uptodate=$((n_uptodate + 1)) ;;
       conflict\ *)
         printf '  ⚠ %-20s CONFLICT (skipped)\n' "$username"
         n_conflict=$((n_conflict + 1))
-        problems="${problems}  ${username}  ${outcome#conflict }"$'\n' ;;
+        # Paths arrive TAB-separated so a path containing a space stays one
+        # entry; render one per line so the list is unambiguous to read.
+        local cpath found=0
+        while IFS= read -r cpath; do
+          [[ -n "$cpath" ]] || continue
+          problems="${problems}  ${username}  ${cpath}"$'\n'
+          found=1
+        done < <(printf '%s\n' "${outcome#conflict }" | tr '\t' '\n')
+        if [[ "$found" == "0" ]]; then
+          problems="${problems}  ${username}  (conflict, no paths reported)"$'\n'
+        fi ;;
       *)
         printf '  ⚠ %-20s %s\n' "$username" "$outcome"
         n_skipped=$((n_skipped + 1))
         problems="${problems}  ${username}  ${outcome#skipped }"$'\n' ;;
     esac
   done < <(echo "$repos_json" \
-    | jq -r '.items[] | [.name, .ssh_url, .clone_url, .default_branch] | @tsv')
+    | jq -r '.items[] | [.name, .ssh_url, .clone_url, .default_branch, .full_name] | @tsv')
+
+  local summary_word="applied"
+  if [[ "$dry_run" == "true" ]]; then summary_word="would be applied"; fi
 
   echo ""
-  echo "${n_applied} applied, ${n_uptodate} up to date, ${n_conflict} conflict, ${n_skipped} skipped"
+  echo "${n_applied} ${summary_word}, ${n_uptodate} up to date, ${n_conflict} conflict, ${n_skipped} skipped"
 
-  if [[ -n "$problems" ]]; then
-    echo ""
-    echo "Needs manual attention:"
-    printf '%s' "$problems"
+  # Non-zero whenever any repo needs a human, dry runs included — that is what
+  # makes --dry-run usable as a pre-flight check in a script.
+  if (( n_conflict + n_skipped > 0 )); then
+    if [[ -n "$problems" ]]; then
+      echo ""
+      echo "Needs manual attention:"
+      printf '%s' "$problems"
+    fi
     return 1
   fi
 }
@@ -540,7 +604,10 @@ NOTES
   Each student is added as an outside collaborator with write access.
   'assignment patch' merges the template's post-distribution changes into every
   student repo. Student work is preserved; repos that conflict are left untouched
-  and reported. Requires git >= 2.38.
+  and reported. A repo is patched only if GitHub confirms it was created from this
+  template AND its root commit is still the distribution snapshot; anything else is
+  skipped with a reason. Exits non-zero if any repo conflicted or was skipped —
+  including under --dry-run. Requires git >= 2.38.
 EOF
   exit 0
 }
