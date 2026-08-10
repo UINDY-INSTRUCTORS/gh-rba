@@ -10,6 +10,67 @@ ORG=""
 die()  { echo "Error: $*" >&2; exit 1; }
 info() { echo "→ $*"; }
 
+# Compare a git version string against the 2.38 floor required by
+# `git merge-tree --write-tree --merge-base`. Numeric compare per component —
+# a lexical compare would wrongly rank 2.9 above 2.38.
+rba_git_version_ok() {
+  local v="$1" major minor
+  major="${v%%.*}"
+  v="${v#*.}"
+  minor="${v%%.*}"
+  [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] || return 1
+  (( major > 2 )) && return 0
+  (( major == 2 && minor >= 38 )) && return 0
+  return 1
+}
+
+rba_require_git_version() {
+  local v
+  v=$(git --version | awk '{print $3}')
+  rba_git_version_ok "$v" \
+    || die "git >= 2.38 is required for 'assignment patch' (found $v)."
+}
+
+# Effective git protocol for github.com. Host-scoped config wins over global —
+# a machine can be globally https while github.com is ssh, and reading only the
+# global value would produce URLs that fail to authenticate.
+rba_git_protocol() {
+  local p
+  p=$(gh config get -h github.com git_protocol 2>/dev/null || true)
+  [[ -n "$p" ]] || p=$(gh config get git_protocol 2>/dev/null || true)
+  echo "$p"
+}
+
+# Pick the clone/push URL matching the configured protocol.
+rba_remote_url() {  # $1 ssh_url, $2 clone_url, $3 protocol
+  if [[ "$3" == "ssh" ]]; then echo "$1"; else echo "$2"; fi
+}
+
+# A git object name: SHA-1 (40 hex) or SHA-256 (64 hex). Anything else reaching
+# `commit-tree` or a push refspec is a correctness hazard — an empty commit OID
+# turns "$new:refs/heads/main" into git's branch-DELETE refspec.
+RBA_OID_RE='^[0-9a-f]{40}$|^[0-9a-f]{64}$'
+
+# First line of a captured stderr file, flattened and prefixed with ": " so it
+# can be appended to an outcome line. Prints nothing when git said nothing.
+# Control characters are squashed so the outcome line stays SINGLE-line and the
+# caller's `case` keeps matching.
+rba_first_err() {  # $1 stderr file
+  local line=""
+  [[ -s "$1" ]] || return 0
+  # LC_ALL=C: git may emit a non-ASCII repo/branch name, and a multibyte-aware
+  # sed aborts with "illegal byte sequence" on invalid input. Bytes are fine
+  # here — we only need control characters squashed.
+  line=$(LC_ALL=C sed -e 's/[[:cntrl:]]/ /g' "$1" | LC_ALL=C sed -e '/^ *$/d' \
+         | head -1 | LC_ALL=C cut -c1-200) || true
+  line="${line#"${line%%[![:space:]]*}"}"   # ltrim
+  [[ -n "$line" ]] || return 0
+  printf ': %s' "$line"
+}
+
+# Lowercase a string. bash 3.2 has no ${var,,}.
+rba_lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
 load_config() {
   if [[ -f "$CONFIG_FILE" ]]; then source "$CONFIG_FILE"; fi
 }
@@ -125,6 +186,310 @@ cmd_assignment_list() {
     | sort -u
 }
 
+# Apply the template's post-distribution changes to one student repo.
+#
+#   $1 scratch    bare repo that already holds refs/rba/template
+#   $2 remote     student repo URL or local path
+#   $3 branch     student's default branch
+#   $4 message    commit message for the patch commit
+#   $5 dry_run    "true" or "false"
+#   $6 tpl_trees  newline-separated tree OIDs of every commit in the template's
+#                 history (see rba_template_trees). The student's root tree must
+#                 appear in this set, otherwise the "root commit == distribution
+#                 snapshot" premise is false and merging would delete their work.
+#
+# Prints exactly one SINGLE-LINE outcome and returns 0:
+#   applied | uptodate | conflict <path>[<TAB><path>...] | skipped <reason>
+#
+# Conflicted paths are TAB-separated, not space-separated: a repository path may
+# legally contain a space, and the caller renders one path per line.
+rba_patch_repo() {
+  local scratch="$1" remote="$2" branch="$3" message="$4" dry_run="$5"
+  local tpl_trees="${6:-}"
+  local base tree root_tree cur_tree new_commit out rc roots root_count paths errf
+
+  errf="${scratch}/.rba-stderr"
+
+  # Never let git open /dev/tty to ask for a password: that prompt is not
+  # suppressed by redirecting stderr, and it would stall the run once per repo.
+  export GIT_TERMINAL_PROMPT=0
+
+  if ! git -C "$scratch" fetch -q --no-tags "$remote" \
+        "+refs/heads/${branch}:refs/rba/student" 2>"$errf"; then
+    # Auth failure, SAML SSO, network and "repo really is empty" all land here;
+    # git's own first line is the only thing that tells them apart.
+    echo "skipped no branch '${branch}'$(rba_first_err "$errf")"
+    return 0
+  fi
+
+  # Exactly one root commit is expected: the distribution snapshot. More than
+  # one means unrelated history was merged in and the base is ambiguous.
+  roots=$(git -C "$scratch" rev-list --max-parents=0 refs/rba/student)
+  # `grep -c` exits 1 when it counts zero, which would trip `set -e` inside a
+  # command substitution — hence the `|| true`.
+  root_count=$(printf '%s\n' "$roots" | grep -c '[0-9a-f]' || true)
+  if [[ "$root_count" != "1" ]]; then
+    echo "skipped ${root_count} root commits, merge base is ambiguous"
+    return 0
+  fi
+  base="$roots"
+
+  # One root is necessary but NOT sufficient. A student who squashed their
+  # history (`rebase -i --root`, `checkout --orphan`) also presents one root —
+  # but its tree is their CURRENT work, so diff(base -> ours) is empty and the
+  # merge result is the template tree verbatim, silently deleting everything
+  # they wrote. GitHub's template instantiation makes the root tree byte-
+  # identical to a tree in the template's history, so require exactly that.
+  # If the template's own history was rewritten no root will match and every
+  # repo is skipped — the correct direction to fail.
+  root_tree=$(git -C "$scratch" rev-parse "${base}^{tree}")
+  if ! printf '%s\n' "$tpl_trees" | grep -qxF "$root_tree"; then
+    echo "skipped root commit is not a snapshot of this template"
+    return 0
+  fi
+
+  # merge-tree exits 1 on conflict, so it must not trip `set -e`. stderr is kept
+  # OUT of $out: on conflict git writes the OID, the paths, the blank line and
+  # the messages all to stdout, so folding stderr in buys nothing and a stray
+  # `warning:` line would be mistaken for the result tree.
+  if out=$(git -C "$scratch" merge-tree --write-tree --name-only \
+             --merge-base="$base" refs/rba/student refs/rba/template 2>"$errf"); then
+    rc=0
+  else
+    rc=$?
+  fi
+
+  if [[ "$rc" == "1" ]]; then
+    # Output: tree OID, then conflicted paths, then a blank line, then messages.
+    paths=$(printf '%s\n' "$out" | awk 'NR==1 {next} /^$/ {exit} {print}' | tr '\n' '\t')
+    echo "conflict ${paths%$'\t'}"
+    return 0
+  fi
+  if [[ "$rc" != "0" ]]; then
+    echo "skipped merge failed$(rba_first_err "$errf")"
+    return 0
+  fi
+
+  tree=$(printf '%s\n' "$out" | head -1)
+  if ! [[ "$tree" =~ $RBA_OID_RE ]]; then
+    echo "skipped unparseable merge result"
+    return 0
+  fi
+
+  cur_tree=$(git -C "$scratch" rev-parse "refs/rba/student^{tree}")
+  if [[ "$tree" == "$cur_tree" ]]; then
+    echo "uptodate"
+    return 0
+  fi
+
+  if [[ "$dry_run" == "true" ]]; then
+    echo "applied"
+    return 0
+  fi
+
+  # errexit does NOT propagate out of the command substitution this function is
+  # called from, so an unguarded failure here would leave $new_commit EMPTY and
+  # the push below would send ":refs/heads/main" — git's branch-DELETE refspec.
+  new_commit=$(git -C "$scratch" commit-tree "$tree" -p refs/rba/student \
+                 -m "$message" 2>"$errf") || new_commit=""
+  if ! [[ "$new_commit" =~ $RBA_OID_RE ]]; then
+    echo "skipped could not create patch commit$(rba_first_err "$errf")"
+    return 0
+  fi
+
+  if git -C "$scratch" push -q "$remote" "${new_commit}:refs/heads/${branch}" 2>"$errf"; then
+    echo "applied"
+  else
+    echo "skipped push rejected$(rba_first_err "$errf")"
+  fi
+}
+
+# Tree OID of every commit reachable from the template ref, one per line.
+# Computed ONCE per invocation and reused for all 34 students — a per-student
+# walk would re-read the whole template history 34 times.
+rba_template_trees() {  # $1 scratch
+  git -C "$1" log --format=%T refs/rba/template
+}
+
+cmd_assignment_patch() {
+  load_config
+  local name="" template="" message="Instructor patch: sync from template"
+  local dry_run=false assume_yes=false
+
+  [[ $# -gt 0 ]] || die "Usage: gh rba assignment patch <assignment-name> [--template <org/repo>] [--message <msg>] [--dry-run] [--yes|-y]"
+  name="$1"; shift
+  [[ "$name" != -* ]] || die "Usage: gh rba assignment patch <assignment-name> [--template <org/repo>] [--message <msg>] [--dry-run] [--yes|-y]"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --template) template="$2"; shift 2 ;;
+      --message)  message="$2";  shift 2 ;;
+      --org)      ORG="$2";      shift 2 ;;
+      --dry-run)  dry_run=true;  shift ;;
+      --yes|-y)   assume_yes=true; shift ;;
+      *) die "Unknown option: $1" ;;
+    esac
+  done
+
+  rba_require_git_version
+
+  local org
+  org=$(require_org)
+  [[ -n "$template" ]] || template="${org}/${name}-template"
+
+  # One API call for everything needed about the template. Keep gh's own error
+  # text: "not found", "rate limit exceeded", "SAML enforcement" and "bad
+  # credentials" all arrive here and need different fixes.
+  local tpl_json tpl_branch tpl_full tpl_errf
+  tpl_errf=$(mktemp)
+  if ! tpl_json=$(gh api "repos/$template" 2>"$tpl_errf"); then
+    local tpl_err
+    tpl_err=$(rba_first_err "$tpl_errf")
+    rm -f "$tpl_errf"
+    die "Could not read template repo '$template'${tpl_err}. Pass --template <org/repo> if it is named differently."
+  fi
+  rm -f "$tpl_errf"
+  tpl_branch=$(echo "$tpl_json" | jq -r '.default_branch')
+  tpl_full=$(echo "$tpl_json" | jq -r '.full_name')
+
+  local repos_json count
+  repos_json=$(gh api "search/repositories?q=topic:rba-assignment-${name}+org:${org}&per_page=100")
+  count=$(echo "$repos_json" | jq '.total_count')
+  [[ "$count" -gt 0 ]] || die "No repos found for assignment '$name' in org '$org'"
+
+  info "Patching '$name' in org '$org' from '$template'"
+  if [[ "$dry_run" == "true" ]]; then
+    info "DRY RUN — no changes will be pushed"
+  elif [[ "$assume_yes" != "true" ]]; then
+    if [[ ! -t 0 ]]; then
+      die "Refusing to patch $count repos without confirmation. Pass --yes to proceed non-interactively."
+    fi
+    printf 'Patch %s student repo(s)? [y/N] ' "$count"
+    local reply; read -r reply
+    [[ "$reply" == "y" || "$reply" == "Y" ]] || die "Aborted."
+  fi
+
+  local proto
+  proto=$(rba_git_protocol)
+
+  # An HTTPS remote with no credential helper otherwise opens an interactive
+  # username/password prompt on /dev/tty — once per repo, and NOT suppressed by
+  # redirecting stderr. Fail fast instead.
+  export GIT_TERMINAL_PROMPT=0
+
+  # $scratch is deliberately NOT `local`: the EXIT trap below fires when the
+  # whole shell exits, which is after this function has returned and any
+  # `local` would have been popped — under `set -u` that would make
+  # "$scratch" an unbound-variable error instead of a cleanup. ${scratch:-}
+  # is a second layer of the same guard in case this ever runs before
+  # $scratch is assigned.
+  #
+  # EXIT traps are also global, not per-function-frame, and this one
+  # unconditionally overwrites any trap already installed by the caller's
+  # shell — e.g. tests/test-patch.sh installs its own `trap ... EXIT` on its
+  # $TMP fixture dir. No current test sources gh-rba and then calls
+  # cmd_assignment_patch in the same shell, so this is latent today, but a
+  # future test that does will silently lose that fixture cleanup.
+  scratch=$(mktemp -d)
+  trap 'rm -rf "${scratch:-}"' EXIT
+  # Ctrl-C and SIGTERM do not fire an EXIT trap on their own; without these the
+  # scratch bare repo (a full copy of the template's objects) is leaked.
+  trap 'rm -rf "${scratch:-}"; exit 130' INT
+  trap 'rm -rf "${scratch:-}"; exit 143' TERM
+
+  git init -q --bare "$scratch"
+  local tpl_url
+  tpl_url=$(rba_remote_url \
+    "$(echo "$tpl_json" | jq -r '.ssh_url')" \
+    "$(echo "$tpl_json" | jq -r '.clone_url')" \
+    "$proto")
+  git -C "$scratch" fetch -q --no-tags "$tpl_url" \
+    "+refs/heads/${tpl_branch}:refs/rba/template" \
+    || die "Could not fetch template branch '$tpl_branch' from $template"
+
+  # Every student's root tree must match one of these. Walked once, not 34 times.
+  local tpl_trees
+  tpl_trees=$(rba_template_trees "$scratch")
+
+  local n_applied=0 n_uptodate=0 n_conflict=0 n_skipped=0
+  local problems=""
+  local applied_word="applied"
+  if [[ "$dry_run" == "true" ]]; then applied_word="would apply"; fi
+
+  echo ""
+  while IFS=$'\t' read -r repo_name ssh_url clone_url def_branch full_name; do
+    local username="${repo_name#"${name}-"}"
+    local url outcome prov prov_errf prov_rc
+    url=$(rba_remote_url "$ssh_url" "$clone_url" "$proto")
+
+    # `--template <org/repo>` is a naming guess and `assignment create` records
+    # the linkage nowhere locally, so ask GitHub which template this repo was
+    # actually instantiated from before merging an unrelated tree into it.
+    # One extra REST call per repo.
+    prov_errf="${scratch}/.rba-gh-stderr"
+    prov_rc=0
+    prov=$(gh api "repos/${full_name}" --jq '.template_repository.full_name // ""' \
+             2>"$prov_errf") || prov_rc=$?
+
+    if [[ "$prov_rc" != "0" ]]; then
+      outcome="skipped could not verify template provenance$(rba_first_err "$prov_errf")"
+    elif [[ -z "$prov" ]]; then
+      # Never merge on unverifiable provenance — a repo with no recorded
+      # template is not known to share the distribution snapshot.
+      outcome="skipped GitHub records no template for this repo"
+    elif [[ "$(rba_lower "$prov")" != "$(rba_lower "$tpl_full")" ]]; then
+      outcome="skipped created from a different template ($prov)"
+    else
+      outcome=$(rba_patch_repo "$scratch" "$url" "$def_branch" "$message" \
+                  "$dry_run" "$tpl_trees")
+    fi
+
+    case "$outcome" in
+      applied)
+        printf '  ✓ %-20s %s\n' "$username" "$applied_word"
+        n_applied=$((n_applied + 1)) ;;
+      uptodate)
+        printf '  ─ %-20s already up to date\n' "$username"; n_uptodate=$((n_uptodate + 1)) ;;
+      conflict\ *)
+        printf '  ⚠ %-20s CONFLICT (skipped)\n' "$username"
+        n_conflict=$((n_conflict + 1))
+        # Paths arrive TAB-separated so a path containing a space stays one
+        # entry; render one per line so the list is unambiguous to read.
+        local cpath found=0
+        while IFS= read -r cpath; do
+          [[ -n "$cpath" ]] || continue
+          problems="${problems}  ${username}  ${cpath}"$'\n'
+          found=1
+        done < <(printf '%s\n' "${outcome#conflict }" | tr '\t' '\n')
+        if [[ "$found" == "0" ]]; then
+          problems="${problems}  ${username}  (conflict, no paths reported)"$'\n'
+        fi ;;
+      *)
+        printf '  ⚠ %-20s %s\n' "$username" "$outcome"
+        n_skipped=$((n_skipped + 1))
+        problems="${problems}  ${username}  ${outcome#skipped }"$'\n' ;;
+    esac
+  done < <(echo "$repos_json" \
+    | jq -r '.items[] | [.name, .ssh_url, .clone_url, .default_branch, .full_name] | @tsv')
+
+  local summary_word="applied"
+  if [[ "$dry_run" == "true" ]]; then summary_word="would be applied"; fi
+
+  echo ""
+  echo "${n_applied} ${summary_word}, ${n_uptodate} up to date, ${n_conflict} conflict, ${n_skipped} skipped"
+
+  # Non-zero whenever any repo needs a human, dry runs included — that is what
+  # makes --dry-run usable as a pre-flight check in a script.
+  if (( n_conflict + n_skipped > 0 )); then
+    if [[ -n "$problems" ]]; then
+      echo ""
+      echo "Needs manual attention:"
+      printf '%s' "$problems"
+    fi
+    return 1
+  fi
+}
+
 cmd_repos_clone() {
   load_config
   [[ $# -gt 0 ]] || die "Usage: gh rba repos clone <assignment-name> [--org <org>]"
@@ -221,6 +586,7 @@ USAGE
   gh rba init --org <org>
   gh rba assignment create --name <name> --template <org/repo> --students <file> [--org <org>]
   gh rba assignment list [--org <org>]
+  gh rba assignment patch <assignment-name> [--template <org/repo>] [--message <msg>] [--dry-run] [--yes|-y] [--org <org>]
   gh rba repos clone <assignment-name> [--org <org>]
   gh rba repos report <assignment-name> [--org <org>]
 
@@ -236,35 +602,50 @@ NOTES
   The template repo must have "Template repository" enabled in its GitHub settings.
   Student repos are created private and named <assignment-name>-<username>.
   Each student is added as an outside collaborator with write access.
+  'assignment patch' merges the template's post-distribution changes into every
+  student repo. Student work is preserved; repos that conflict are left untouched
+  and reported. A repo is patched only if GitHub confirms it was created from this
+  template AND its root commit is still the distribution snapshot; anything else is
+  skipped with a reason. Exits non-zero if any repo conflicted or was skipped —
+  including under --dry-run. Requires git >= 2.38.
 EOF
   exit 0
 }
 
 # ── Dispatch ──────────────────────────────────────────────────────────────────
 
-[[ $# -eq 0 ]] && usage
+main() {
+  [[ $# -eq 0 ]] && usage
 
-case "$1" in
-  init)    shift; cmd_init "$@" ;;
-  assignment)
-    shift
-    [[ $# -gt 0 ]] || usage
-    case "$1" in
-      create) shift; cmd_assignment_create "$@" ;;
-      list)   shift; cmd_assignment_list "$@" ;;
-      *)      usage ;;
-    esac
-    ;;
-  repos)
-    shift
-    [[ $# -gt 0 ]] || usage
-    case "$1" in
-      clone)  shift; cmd_repos_clone "$@" ;;
-      report) shift; cmd_repos_report "$@" ;;
-      *)      usage ;;
-    esac
-    ;;
-  version|--version) echo "gh-rba v${VERSION}" ;;
-  help|--help|-h)    usage ;;
-  *) die "Unknown command: $1. Run 'gh rba help' for usage." ;;
-esac
+  case "$1" in
+    init)    shift; cmd_init "$@" ;;
+    assignment)
+      shift
+      [[ $# -gt 0 ]] || usage
+      case "$1" in
+        create) shift; cmd_assignment_create "$@" ;;
+        list)   shift; cmd_assignment_list "$@" ;;
+        patch)  shift; cmd_assignment_patch "$@" ;;
+        *)      usage ;;
+      esac
+      ;;
+    repos)
+      shift
+      [[ $# -gt 0 ]] || usage
+      case "$1" in
+        clone)  shift; cmd_repos_clone "$@" ;;
+        report) shift; cmd_repos_report "$@" ;;
+        *)      usage ;;
+      esac
+      ;;
+    version|--version) echo "gh-rba v${VERSION}" ;;
+    help|--help|-h)    usage ;;
+    *) die "Unknown command: $1. Run 'gh rba help' for usage." ;;
+  esac
+}
+
+# Only dispatch when executed directly. Sourcing (the test suite) just defines
+# functions.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi
