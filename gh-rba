@@ -10,6 +10,27 @@ ORG=""
 die()  { echo "Error: $*" >&2; exit 1; }
 info() { echo "→ $*"; }
 
+# Compare a git version string against the 2.38 floor required by
+# `git merge-tree --write-tree --merge-base`. Numeric compare per component —
+# a lexical compare would wrongly rank 2.9 above 2.38.
+rba_git_version_ok() {
+  local v="$1" major minor
+  major="${v%%.*}"
+  v="${v#*.}"
+  minor="${v%%.*}"
+  [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] || return 1
+  (( major > 2 )) && return 0
+  (( major == 2 && minor >= 38 )) && return 0
+  return 1
+}
+
+rba_require_git_version() {
+  local v
+  v=$(git --version | awk '{print $3}')
+  rba_git_version_ok "$v" \
+    || die "git >= 2.38 is required for 'assignment patch' (found $v)."
+}
+
 load_config() {
   if [[ -f "$CONFIG_FILE" ]]; then source "$CONFIG_FILE"; fi
 }
@@ -242,29 +263,37 @@ EOF
 
 # ── Dispatch ──────────────────────────────────────────────────────────────────
 
-[[ $# -eq 0 ]] && usage
+main() {
+  [[ $# -eq 0 ]] && usage
 
-case "$1" in
-  init)    shift; cmd_init "$@" ;;
-  assignment)
-    shift
-    [[ $# -gt 0 ]] || usage
-    case "$1" in
-      create) shift; cmd_assignment_create "$@" ;;
-      list)   shift; cmd_assignment_list "$@" ;;
-      *)      usage ;;
-    esac
-    ;;
-  repos)
-    shift
-    [[ $# -gt 0 ]] || usage
-    case "$1" in
-      clone)  shift; cmd_repos_clone "$@" ;;
-      report) shift; cmd_repos_report "$@" ;;
-      *)      usage ;;
-    esac
-    ;;
-  version|--version) echo "gh-rba v${VERSION}" ;;
-  help|--help|-h)    usage ;;
-  *) die "Unknown command: $1. Run 'gh rba help' for usage." ;;
-esac
+  case "$1" in
+    init)    shift; cmd_init "$@" ;;
+    assignment)
+      shift
+      [[ $# -gt 0 ]] || usage
+      case "$1" in
+        create) shift; cmd_assignment_create "$@" ;;
+        list)   shift; cmd_assignment_list "$@" ;;
+        *)      usage ;;
+      esac
+      ;;
+    repos)
+      shift
+      [[ $# -gt 0 ]] || usage
+      case "$1" in
+        clone)  shift; cmd_repos_clone "$@" ;;
+        report) shift; cmd_repos_report "$@" ;;
+        *)      usage ;;
+      esac
+      ;;
+    version|--version) echo "gh-rba v${VERSION}" ;;
+    help|--help|-h)    usage ;;
+    *) die "Unknown command: $1. Run 'gh rba help' for usage." ;;
+  esac
+}
+
+# Only dispatch when executed directly. Sourcing (the test suite) just defines
+# functions.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi
