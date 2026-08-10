@@ -232,6 +232,107 @@ rba_patch_repo() {
   fi
 }
 
+cmd_assignment_patch() {
+  load_config
+  local name="" template="" message="Instructor patch: sync from template"
+  local dry_run=false assume_yes=false
+
+  [[ $# -gt 0 ]] || die "Usage: gh rba assignment patch <assignment-name> [--template <org/repo>] [--message <msg>] [--dry-run] [--yes]"
+  name="$1"; shift
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --template) template="$2"; shift 2 ;;
+      --message)  message="$2";  shift 2 ;;
+      --org)      ORG="$2";      shift 2 ;;
+      --dry-run)  dry_run=true;  shift ;;
+      --yes|-y)   assume_yes=true; shift ;;
+      *) die "Unknown option: $1" ;;
+    esac
+  done
+
+  rba_require_git_version
+
+  local org
+  org=$(require_org)
+  [[ -n "$template" ]] || template="${org}/${name}-template"
+
+  # One API call for everything needed about the template.
+  local tpl_json tpl_branch
+  tpl_json=$(gh api "repos/$template" 2>/dev/null) \
+    || die "Template repo '$template' not found. Pass --template <org/repo> if it is named differently."
+  tpl_branch=$(echo "$tpl_json" | jq -r '.default_branch')
+
+  local repos_json count
+  repos_json=$(gh api "search/repositories?q=topic:rba-assignment-${name}+org:${org}&per_page=100")
+  count=$(echo "$repos_json" | jq '.total_count')
+  [[ "$count" -gt 0 ]] || die "No repos found for assignment '$name' in org '$org'"
+
+  info "Patching '$name' in org '$org' from '$template'"
+  if [[ "$dry_run" == "true" ]]; then
+    info "DRY RUN — no changes will be pushed"
+  elif [[ "$assume_yes" != "true" ]]; then
+    if [[ ! -t 0 ]]; then
+      die "Refusing to patch $count repos without confirmation. Pass --yes to proceed non-interactively."
+    fi
+    printf 'Patch %s student repo(s)? [y/N] ' "$count"
+    local reply; read -r reply
+    [[ "$reply" == "y" || "$reply" == "Y" ]] || die "Aborted."
+  fi
+
+  local proto scratch
+  proto=$(rba_git_protocol)
+  scratch=$(mktemp -d)
+  trap 'rm -rf "$scratch"' EXIT
+
+  git init -q --bare "$scratch"
+  local tpl_url
+  tpl_url=$(rba_remote_url \
+    "$(echo "$tpl_json" | jq -r '.ssh_url')" \
+    "$(echo "$tpl_json" | jq -r '.clone_url')" \
+    "$proto")
+  git -C "$scratch" fetch -q --no-tags "$tpl_url" \
+    "+refs/heads/${tpl_branch}:refs/rba/template" \
+    || die "Could not fetch template branch '$tpl_branch' from $template"
+
+  local n_applied=0 n_uptodate=0 n_conflict=0 n_skipped=0
+  local problems=""
+
+  echo ""
+  while IFS=$'\t' read -r repo_name ssh_url clone_url def_branch; do
+    local username="${repo_name#"${name}-"}"
+    local url outcome
+    url=$(rba_remote_url "$ssh_url" "$clone_url" "$proto")
+    outcome=$(rba_patch_repo "$scratch" "$url" "$def_branch" "$message" "$dry_run")
+
+    case "$outcome" in
+      applied)
+        printf '  ✓ %-20s applied\n' "$username"; n_applied=$((n_applied + 1)) ;;
+      uptodate)
+        printf '  ─ %-20s already up to date\n' "$username"; n_uptodate=$((n_uptodate + 1)) ;;
+      conflict\ *)
+        printf '  ⚠ %-20s CONFLICT (skipped)\n' "$username"
+        n_conflict=$((n_conflict + 1))
+        problems="${problems}  ${username}  ${outcome#conflict }"$'\n' ;;
+      *)
+        printf '  ⚠ %-20s %s\n' "$username" "$outcome"
+        n_skipped=$((n_skipped + 1))
+        problems="${problems}  ${username}  ${outcome#skipped }"$'\n' ;;
+    esac
+  done < <(echo "$repos_json" \
+    | jq -r '.items[] | [.name, .ssh_url, .clone_url, .default_branch] | @tsv')
+
+  echo ""
+  echo "${n_applied} applied, ${n_uptodate} up to date, ${n_conflict} conflict, ${n_skipped} skipped"
+
+  if [[ -n "$problems" ]]; then
+    echo ""
+    echo "Needs manual attention:"
+    printf '%s' "$problems"
+    return 1
+  fi
+}
+
 cmd_repos_clone() {
   load_config
   [[ $# -gt 0 ]] || die "Usage: gh rba repos clone <assignment-name> [--org <org>]"
@@ -328,6 +429,7 @@ USAGE
   gh rba init --org <org>
   gh rba assignment create --name <name> --template <org/repo> --students <file> [--org <org>]
   gh rba assignment list [--org <org>]
+  gh rba assignment patch <assignment-name> [--template <org/repo>] [--message <msg>] [--dry-run] [--yes] [--org <org>]
   gh rba repos clone <assignment-name> [--org <org>]
   gh rba repos report <assignment-name> [--org <org>]
 
@@ -343,6 +445,9 @@ NOTES
   The template repo must have "Template repository" enabled in its GitHub settings.
   Student repos are created private and named <assignment-name>-<username>.
   Each student is added as an outside collaborator with write access.
+  'assignment patch' merges the template's post-distribution changes into every
+  student repo. Student work is preserved; repos that conflict are left untouched
+  and reported. Requires git >= 2.38.
 EOF
   exit 0
 }
@@ -360,6 +465,7 @@ main() {
       case "$1" in
         create) shift; cmd_assignment_create "$@" ;;
         list)   shift; cmd_assignment_list "$@" ;;
+        patch)  shift; cmd_assignment_patch "$@" ;;
         *)      usage ;;
       esac
       ;;

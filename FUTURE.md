@@ -1,13 +1,5 @@
 # Future Work
 
-## Patching assignments after creation
-
-It's easy to post an assignment and then remember something you forgot to include.
-A future `gh rba assignment patch` command would apply a commit (or patch file) to
-all student repos for a given assignment — without requiring the fork relationship
-that GitHub Classroom relied on. Likely implementation: iterate over student repos,
-apply the patch via the GitHub Contents API or by cloning, committing, and pushing.
-
 ## Rewrite in Python
 
 The current implementation is a bash script, which is fine for the current scope but
@@ -17,7 +9,9 @@ native Windows support. Bash requires WSL or Git Bash on Windows; Python does no
 
 A rewrite makes sense when any of these become true:
 - Pagination is needed (classes larger than 100 students)
-- The patch command above is added (more complex logic)
+- ~~The patch command above is added~~ — done in bash (see
+  `docs/superpowers/specs/2026-08-10-assignment-patch-design.md`). Whether that
+  turns out painful to maintain is evidence for this decision.
 - Windows support is required for faculty
 - The config format needs to grow beyond a single `ORG=` line
 

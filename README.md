@@ -119,6 +119,40 @@ gh rba assignment create \
 
 ---
 
+### Patching a distributed assignment
+
+Fix the template repo as normal, then push the fix to every student repo:
+
+```bash
+cd hw01-java-intro-template
+vim .github/workflows/test.yml
+git commit -am "fix JUnit jar path"
+git push
+
+gh rba assignment patch hw01 --dry-run   # preview
+gh rba assignment patch hw01             # do it
+```
+
+Each student repo is merged three ways: its own root commit (the snapshot it was
+created from) is the merge base, its current branch is "ours", and the template
+is "theirs". Student work is preserved. A repo whose student edited the same
+lines you fixed is **left completely untouched** and reported at the end for you
+to handle by hand.
+
+Patching is idempotent — re-running reports "already up to date", so an
+interrupted run is safe to resume.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--template <org/repo>` | `<org>/<assignment>-template` | Where the fix comes from |
+| `--message <msg>` | `Instructor patch: sync from template` | Commit message |
+| `--dry-run` | off | Run every merge, push nothing |
+| `--yes` | off | Skip the confirmation prompt |
+
+Requires git >= 2.38.
+
+---
+
 ### `gh rba assignment list`
 
 ```
