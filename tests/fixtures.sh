@@ -61,6 +61,30 @@ fixture_scratch() {  # $1 dir
   echo "$d/scratch"
 }
 
+# Snapshot the template into a fresh bare student repo as ONE root commit that
+# also contains extra student-authored files — i.e. what a student's repo looks
+# like after `git rebase -i --root` or `checkout --orphan` squashes everything.
+# Exactly one root, but its tree is NOT a template tree.
+fixture_distribute_squashed() {  # $1 dir, $2 extra file, $3 extra content
+  local d="$1"
+  git init -q --bare "$d/stu.git"
+  git clone -q "$d/stu.git" "$d/stuwork" 2>/dev/null
+  git -C "$d/stuwork" symbolic-ref HEAD refs/heads/main
+  git -C "$d/stuwork" config user.email student@example.edu
+  git -C "$d/stuwork" config user.name  "Student"
+  ( cd "$d/tpl" && git archive HEAD ) | tar -x -C "$d/stuwork"
+  printf '%s' "$3" > "$d/stuwork/$2"
+  git -C "$d/stuwork" add -A
+  git -C "$d/stuwork" commit -qm "squashed history"
+  git -C "$d/stuwork" push -q origin HEAD:refs/heads/main
+}
+
+# The tree-OID set of the template's history, as cmd_assignment_patch computes
+# it once per invocation and passes to rba_patch_repo.
+fixture_tpl_trees() {  # $1 scratch dir
+  git -C "$1" log --format=%T refs/rba/template
+}
+
 # Read a file's content from the student's bare remote (post-push truth).
 fixture_stu_show() {  # $1 dir, $2 path
   git -C "$1/stu.git" cat-file blob "main:$2"

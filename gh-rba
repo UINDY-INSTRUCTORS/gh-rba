@@ -46,6 +46,31 @@ rba_remote_url() {  # $1 ssh_url, $2 clone_url, $3 protocol
   if [[ "$3" == "ssh" ]]; then echo "$1"; else echo "$2"; fi
 }
 
+# A git object name: SHA-1 (40 hex) or SHA-256 (64 hex). Anything else reaching
+# `commit-tree` or a push refspec is a correctness hazard — an empty commit OID
+# turns "$new:refs/heads/main" into git's branch-DELETE refspec.
+RBA_OID_RE='^[0-9a-f]{40}$|^[0-9a-f]{64}$'
+
+# First line of a captured stderr file, flattened and prefixed with ": " so it
+# can be appended to an outcome line. Prints nothing when git said nothing.
+# Control characters are squashed so the outcome line stays SINGLE-line and the
+# caller's `case` keeps matching.
+rba_first_err() {  # $1 stderr file
+  local line=""
+  [[ -s "$1" ]] || return 0
+  # LC_ALL=C: git may emit a non-ASCII repo/branch name, and a multibyte-aware
+  # sed aborts with "illegal byte sequence" on invalid input. Bytes are fine
+  # here — we only need control characters squashed.
+  line=$(LC_ALL=C sed -e 's/[[:cntrl:]]/ /g' "$1" | LC_ALL=C sed -e '/^ *$/d' \
+         | head -1 | LC_ALL=C cut -c1-200) || true
+  line="${line#"${line%%[![:space:]]*}"}"   # ltrim
+  [[ -n "$line" ]] || return 0
+  printf ': %s' "$line"
+}
+
+# Lowercase a string. bash 3.2 has no ${var,,}.
+rba_lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
 load_config() {
   if [[ -f "$CONFIG_FILE" ]]; then source "$CONFIG_FILE"; fi
 }
@@ -163,21 +188,37 @@ cmd_assignment_list() {
 
 # Apply the template's post-distribution changes to one student repo.
 #
-#   $1 scratch  bare repo that already holds refs/rba/template
-#   $2 remote   student repo URL or local path
-#   $3 branch   student's default branch
-#   $4 message  commit message for the patch commit
-#   $5 dry_run  "true" or "false"
+#   $1 scratch    bare repo that already holds refs/rba/template
+#   $2 remote     student repo URL or local path
+#   $3 branch     student's default branch
+#   $4 message    commit message for the patch commit
+#   $5 dry_run    "true" or "false"
+#   $6 tpl_trees  newline-separated tree OIDs of every commit in the template's
+#                 history (see rba_template_trees). The student's root tree must
+#                 appear in this set, otherwise the "root commit == distribution
+#                 snapshot" premise is false and merging would delete their work.
 #
-# Prints exactly one outcome line and returns 0:
-#   applied | uptodate | conflict <path>... | skipped <reason>
+# Prints exactly one SINGLE-LINE outcome and returns 0:
+#   applied | uptodate | conflict <path>[<TAB><path>...] | skipped <reason>
+#
+# Conflicted paths are TAB-separated, not space-separated: a repository path may
+# legally contain a space, and the caller renders one path per line.
 rba_patch_repo() {
   local scratch="$1" remote="$2" branch="$3" message="$4" dry_run="$5"
-  local base tree cur_tree new_commit out rc roots root_count paths
+  local tpl_trees="${6:-}"
+  local base tree root_tree cur_tree new_commit out rc roots root_count paths errf
+
+  errf="${scratch}/.rba-stderr"
+
+  # Never let git open /dev/tty to ask for a password: that prompt is not
+  # suppressed by redirecting stderr, and it would stall the run once per repo.
+  export GIT_TERMINAL_PROMPT=0
 
   if ! git -C "$scratch" fetch -q --no-tags "$remote" \
-        "+refs/heads/${branch}:refs/rba/student" 2>/dev/null; then
-    echo "skipped no branch '${branch}'"
+        "+refs/heads/${branch}:refs/rba/student" 2>"$errf"; then
+    # Auth failure, SAML SSO, network and "repo really is empty" all land here;
+    # git's own first line is the only thing that tells them apart.
+    echo "skipped no branch '${branch}'$(rba_first_err "$errf")"
     return 0
   fi
 
@@ -193,9 +234,26 @@ rba_patch_repo() {
   fi
   base="$roots"
 
-  # merge-tree exits 1 on conflict, so it must not trip `set -e`.
+  # One root is necessary but NOT sufficient. A student who squashed their
+  # history (`rebase -i --root`, `checkout --orphan`) also presents one root —
+  # but its tree is their CURRENT work, so diff(base -> ours) is empty and the
+  # merge result is the template tree verbatim, silently deleting everything
+  # they wrote. GitHub's template instantiation makes the root tree byte-
+  # identical to a tree in the template's history, so require exactly that.
+  # If the template's own history was rewritten no root will match and every
+  # repo is skipped — the correct direction to fail.
+  root_tree=$(git -C "$scratch" rev-parse "${base}^{tree}")
+  if ! printf '%s\n' "$tpl_trees" | grep -qxF "$root_tree"; then
+    echo "skipped root commit is not a snapshot of this template"
+    return 0
+  fi
+
+  # merge-tree exits 1 on conflict, so it must not trip `set -e`. stderr is kept
+  # OUT of $out: on conflict git writes the OID, the paths, the blank line and
+  # the messages all to stdout, so folding stderr in buys nothing and a stray
+  # `warning:` line would be mistaken for the result tree.
   if out=$(git -C "$scratch" merge-tree --write-tree --name-only \
-             --merge-base="$base" refs/rba/student refs/rba/template 2>&1); then
+             --merge-base="$base" refs/rba/student refs/rba/template 2>"$errf"); then
     rc=0
   else
     rc=$?
@@ -203,16 +261,21 @@ rba_patch_repo() {
 
   if [[ "$rc" == "1" ]]; then
     # Output: tree OID, then conflicted paths, then a blank line, then messages.
-    paths=$(printf '%s\n' "$out" | awk 'NR==1 {next} /^$/ {exit} {print}' | tr '\n' ' ')
-    echo "conflict ${paths% }"
+    paths=$(printf '%s\n' "$out" | awk 'NR==1 {next} /^$/ {exit} {print}' | tr '\n' '\t')
+    echo "conflict ${paths%$'\t'}"
     return 0
   fi
   if [[ "$rc" != "0" ]]; then
-    echo "skipped merge failed"
+    echo "skipped merge failed$(rba_first_err "$errf")"
     return 0
   fi
 
   tree=$(printf '%s\n' "$out" | head -1)
+  if ! [[ "$tree" =~ $RBA_OID_RE ]]; then
+    echo "skipped unparseable merge result"
+    return 0
+  fi
+
   cur_tree=$(git -C "$scratch" rev-parse "refs/rba/student^{tree}")
   if [[ "$tree" == "$cur_tree" ]]; then
     echo "uptodate"
@@ -224,12 +287,28 @@ rba_patch_repo() {
     return 0
   fi
 
-  new_commit=$(git -C "$scratch" commit-tree "$tree" -p refs/rba/student -m "$message")
-  if git -C "$scratch" push -q "$remote" "${new_commit}:refs/heads/${branch}" 2>/dev/null; then
+  # errexit does NOT propagate out of the command substitution this function is
+  # called from, so an unguarded failure here would leave $new_commit EMPTY and
+  # the push below would send ":refs/heads/main" — git's branch-DELETE refspec.
+  new_commit=$(git -C "$scratch" commit-tree "$tree" -p refs/rba/student \
+                 -m "$message" 2>"$errf") || new_commit=""
+  if ! [[ "$new_commit" =~ $RBA_OID_RE ]]; then
+    echo "skipped could not create patch commit$(rba_first_err "$errf")"
+    return 0
+  fi
+
+  if git -C "$scratch" push -q "$remote" "${new_commit}:refs/heads/${branch}" 2>"$errf"; then
     echo "applied"
   else
-    echo "skipped push rejected"
+    echo "skipped push rejected$(rba_first_err "$errf")"
   fi
+}
+
+# Tree OID of every commit reachable from the template ref, one per line.
+# Computed ONCE per invocation and reused for all 34 students — a per-student
+# walk would re-read the whole template history 34 times.
+rba_template_trees() {  # $1 scratch
+  git -C "$1" log --format=%T refs/rba/template
 }
 
 cmd_assignment_patch() {
