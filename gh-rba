@@ -146,6 +146,77 @@ cmd_assignment_list() {
     | sort -u
 }
 
+# Apply the template's post-distribution changes to one student repo.
+#
+#   $1 scratch  bare repo that already holds refs/rba/template
+#   $2 remote   student repo URL or local path
+#   $3 branch   student's default branch
+#   $4 message  commit message for the patch commit
+#   $5 dry_run  "true" or "false"
+#
+# Prints exactly one outcome line and returns 0:
+#   applied | uptodate | conflict <path>... | skipped <reason>
+rba_patch_repo() {
+  local scratch="$1" remote="$2" branch="$3" message="$4" dry_run="$5"
+  local base tree cur_tree new_commit out rc roots root_count paths
+
+  if ! git -C "$scratch" fetch -q --no-tags "$remote" \
+        "+refs/heads/${branch}:refs/rba/student" 2>/dev/null; then
+    echo "skipped no branch '${branch}'"
+    return 0
+  fi
+
+  # Exactly one root commit is expected: the distribution snapshot. More than
+  # one means unrelated history was merged in and the base is ambiguous.
+  roots=$(git -C "$scratch" rev-list --max-parents=0 refs/rba/student)
+  # `grep -c` exits 1 when it counts zero, which would trip `set -e` inside a
+  # command substitution — hence the `|| true`.
+  root_count=$(printf '%s\n' "$roots" | grep -c '[0-9a-f]' || true)
+  if [[ "$root_count" != "1" ]]; then
+    echo "skipped ${root_count} root commits, merge base is ambiguous"
+    return 0
+  fi
+  base="$roots"
+
+  # merge-tree exits 1 on conflict, so it must not trip `set -e`.
+  if out=$(git -C "$scratch" merge-tree --write-tree --name-only \
+             --merge-base="$base" refs/rba/student refs/rba/template 2>&1); then
+    rc=0
+  else
+    rc=$?
+  fi
+
+  if [[ "$rc" == "1" ]]; then
+    # Output: tree OID, then conflicted paths, then a blank line, then messages.
+    paths=$(printf '%s\n' "$out" | awk 'NR==1 {next} /^$/ {exit} {print}' | tr '\n' ' ')
+    echo "conflict ${paths% }"
+    return 0
+  fi
+  if [[ "$rc" != "0" ]]; then
+    echo "skipped merge failed"
+    return 0
+  fi
+
+  tree=$(printf '%s\n' "$out" | head -1)
+  cur_tree=$(git -C "$scratch" rev-parse "refs/rba/student^{tree}")
+  if [[ "$tree" == "$cur_tree" ]]; then
+    echo "uptodate"
+    return 0
+  fi
+
+  if [[ "$dry_run" == "true" ]]; then
+    echo "applied"
+    return 0
+  fi
+
+  new_commit=$(git -C "$scratch" commit-tree "$tree" -p refs/rba/student -m "$message")
+  if git -C "$scratch" push -q "$remote" "${new_commit}:refs/heads/${branch}" 2>/dev/null; then
+    echo "applied"
+  else
+    echo "skipped push rejected"
+  fi
+}
+
 cmd_repos_clone() {
   load_config
   [[ $# -gt 0 ]] || die "Usage: gh rba repos clone <assignment-name> [--org <org>]"
