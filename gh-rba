@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 CONFIG_FILE=".rba"
 ORG=""
 
@@ -69,6 +69,8 @@ rba_first_err() {  # $1 stderr file
 }
 
 # Lowercase a string. bash 3.2 has no ${var,,}.
+rba_trim() { local v="$1"; v="${v#"${v%%[![:space:]]*}"}"; printf '%s' "${v%"${v##*[![:space:]]}"}"; }
+
 rba_lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
 load_config() {
@@ -110,20 +112,24 @@ cmd_init() {
 
 cmd_assignment_create() {
   load_config
-  local name="" template="" students_file=""
+  local name="" template="" students_file="" teams_file=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --name)     name="$2";         shift 2 ;;
-      --template) template="$2";     shift 2 ;;
+      --name)     name="$2";          shift 2 ;;
+      --template) template="$2";      shift 2 ;;
       --students) students_file="$2"; shift 2 ;;
-      --org)      ORG="$2";          shift 2 ;;
+      --teams)    teams_file="$2";    shift 2 ;;
+      --org)      ORG="$2";           shift 2 ;;
       *) die "Unknown option: $1" ;;
     esac
   done
 
-  [[ -n "$name"          ]] || die "Usage: gh rba assignment create --name <name> --template <org/repo> --students <file>"
-  [[ -n "$template"      ]] || die "--template <org/repo> is required"
-  [[ -n "$students_file" ]] || die "--students <file> is required"
+  [[ -n "$name"     ]] || die "Usage: gh rba assignment create --name <name> --template <org/repo> (--students <file> | --teams <file>)"
+  [[ -n "$template" ]] || die "--template <org/repo> is required"
+  [[ -n "$students_file" || -n "$teams_file" ]] \
+    || die "one of --students <file> or --teams <file> is required"
+  [[ -n "$students_file" && -n "$teams_file" ]] \
+    && die "--students and --teams are mutually exclusive"
 
   local org
   org=$(require_org)
@@ -135,32 +141,85 @@ cmd_assignment_create() {
   [[ "$is_template" == "true" ]] \
     || die "'$template' is not marked as a template repo. Enable it under Settings → General → 'Template repository'."
 
+  # ── Build the work list: one line of "repo_suffix<TAB>user user ..." ──────
+  local worklist
+  worklist=$(mktemp)
+  if [[ -n "$teams_file" ]]; then
+    while IFS= read -r line; do
+      local team members
+      team="${line%%,*}"; team="$(rba_trim "$team")"
+      members="${line#*,}"
+      [[ -n "$team" ]] || die "Team roster line has no team name: $line"
+      [[ "$members" == "$line" ]] && die "Team '$team' lists no members. Format: team-name, user1, user2"
+      local list="" m
+      # printf '%s\n' -- without the trailing newline the final member is
+      # dropped, because `read` returns non-zero on an unterminated last line.
+      while IFS= read -r m || [[ -n "$m" ]]; do
+        m="$(rba_trim "$m")"
+        [[ -n "$m" ]] && list+="$m "
+      done < <(printf '%s\n' "$members" | tr ',' '\n')
+      [[ -n "$list" ]] || die "Team '$team' lists no members."
+      printf '%s\t%s\n' "$team" "${list% }" >> "$worklist"
+    done < <(read_roster "$teams_file")
+  else
+    while IFS=',' read -r username _fullname; do
+      username="$(rba_trim "$username")"
+      [[ -n "$username" ]] && printf '%s\t%s\n' "$username" "$username" >> "$worklist"
+    done < <(read_roster "$students_file")
+  fi
+
+  [[ -s "$worklist" ]] || { rm -f "$worklist"; die "No entries found in the roster."; }
+
+  # ── Validate every username BEFORE creating anything ─────────────────────
+  # A typo otherwise leaves a repo standing with a collaborator missing, which
+  # is harder to notice than an outright failure.
+  info "Validating GitHub usernames"
+  local bad=""
+  local all_users
+  all_users=$(cut -f2 "$worklist" | tr ' ' '\n' | sort -u)
+  while IFS= read -r u; do
+    [[ -z "$u" ]] && continue
+    gh api "users/$u" --jq .login >/dev/null 2>&1 || bad+="$u "
+  done <<< "$all_users"
+  if [[ -n "$bad" ]]; then
+    rm -f "$worklist"
+    die "These usernames do not exist on GitHub: ${bad% }"
+  fi
+  info "  all $(printf '%s\n' "$all_users" | grep -c .) usernames valid"
+
   info "Creating assignment '$name' in org '$org' from template '$template'"
 
-  while IFS=',' read -r username fullname; do
-    username="${username// /}"
-    local repo_name="${name}-${username}"
+  local suffix members repo_name created
+  while IFS=$'\t' read -r suffix members; do
+    repo_name="${name}-${suffix}"
+    info "  $suffix → $org/$repo_name"
 
-    info "  $username → $org/$repo_name"
-
+    created=false
     if gh repo create "$org/$repo_name" \
         --template "$template" \
         --private 2>/dev/null; then
-
-      # Tag with assignment topics
+      created=true
       gh api --method PUT "repos/$org/$repo_name/topics" \
         --field 'names[]=rba-assignment' \
         --field "names[]=rba-assignment-${name}" > /dev/null
-
-      # Add student as outside collaborator (write access)
-      gh api --method PUT "repos/$org/$repo_name/collaborators/$username" \
-        --field permission=push > /dev/null
-
-      echo "    ✓ created, $username added as collaborator"
     else
-      echo "    ⚠ skipped (repo may already exist)" >&2
+      echo "    · repo already exists — checking collaborators" >&2
     fi
-  done < <(read_roster "$students_file")
+
+    # Add every member. Existing collaborators are unaffected, and nobody is
+    # ever removed: re-running after editing the teams file is how you re-pair.
+    local u
+    for u in $members; do
+      if gh api --method PUT "repos/$org/$repo_name/collaborators/$u" \
+           --field permission=push > /dev/null 2>&1; then
+        echo "    ✓ $u has write access"
+      else
+        echo "    ⚠ could not add $u" >&2
+      fi
+    done
+    $created && echo "    ✓ created"
+  done < "$worklist"
+  rm -f "$worklist"
 
   info "Done. Assignment '$name' created."
 }
@@ -584,7 +643,7 @@ gh-rba v${VERSION} — R.B. Annis School of Engineering GitHub Tools
 
 USAGE
   gh rba init --org <org>
-  gh rba assignment create --name <name> --template <org/repo> --students <file> [--org <org>]
+  gh rba assignment create --name <name> --template <org/repo> (--students <file> | --teams <file>) [--org <org>]
   gh rba assignment list [--org <org>]
   gh rba assignment patch <assignment-name> [--template <org/repo>] [--message <msg>] [--dry-run] [--yes|-y] [--org <org>]
   gh rba repos clone <assignment-name> [--org <org>]
@@ -595,13 +654,22 @@ CONFIG
   All commands accept --org to override the default.
 
 ROSTER FORMAT
-  Plain text (one GitHub username per line) or CSV (username,Full Name).
-  Lines starting with # and blank lines are ignored.
+  --students : one GitHub username per line, or CSV (username,Full Name).
+  --teams    : one team per line, name first, then its members:
+                   team-1, alice, bob
+                   solo-eve, eve
+               The repo is named <assignment-name>-<team-name> and every member
+               is added with write access. A team of one needs no special case.
+  Lines starting with # and blank lines are ignored in both.
 
 NOTES
   The template repo must have "Template repository" enabled in its GitHub settings.
-  Student repos are created private and named <assignment-name>-<username>.
-  Each student is added as an outside collaborator with write access.
+  Student repos are created private and named <assignment-name>-<username>,
+  or <assignment-name>-<team-name> under --teams.
+  Each member is added as an outside collaborator with write access.
+  Every username is validated before any repo is created.
+  Re-running adds missing collaborators to repos that already exist and never
+  removes anyone — editing the teams file and re-running is how you re-pair.
   'assignment patch' merges the template's post-distribution changes into every
   student repo. Student work is preserved; repos that conflict are left untouched
   and reported. A repo is patched only if GitHub confirms it was created from this
