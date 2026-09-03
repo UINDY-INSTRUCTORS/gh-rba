@@ -1,5 +1,12 @@
 # Future Work
 
+> **See also:** `docs/superpowers/specs/2026-09-03-course-in-the-org-design.md`,
+> which proposes that each semester's org own its own data in a private
+> `course-admin` repo, cloned and worked in, so the working directory identifies
+> the course. It argues for staying in bash: `course.env` remains `KEY=value`,
+> so the trigger below fires only weakly, and pagination and Windows are still
+> unmet.
+
 ## Rewrite in Python
 
 The current implementation is a bash script, which is fine for the current scope but
