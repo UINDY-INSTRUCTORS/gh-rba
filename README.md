@@ -35,14 +35,21 @@ gh extension install /path/to/gh-rba
 
 ## Setup
 
-Create a GitHub org for your course inside the UIndy enterprise (e.g. `202520-EENG-340`), then run once per course directory to save it as the default:
+Create a GitHub org for your course inside the UIndy enterprise (e.g. `202520-EENG-340`).
+
+`gh rba` reads a `course.env` file from the **current working directory**, so the directory you are standing in decides which course you are operating on. The intended arrangement is that the org owns a `course` repo holding `course.env` and the roster, cloned as the term directory:
 
 ```bash
-cd ~/courses/202520-EENG-340
-gh rba init --org 202520-EENG-340
+git clone git@github.com:202520-EENG-340/course.git ~/courses/eeng/eeng-340/202520
+cd ~/courses/eeng/eeng-340/202520
+gh rba assignment list          # no --org needed
 ```
 
-This writes a `.rba` file in the current directory. All subsequent commands run from this directory will use that org as the default. Any command also accepts `--org <org>` to override.
+That keeps the roster in the org it describes, with an upstream, rather than in a local file that can quietly diverge between machines.
+
+If you have no such repo, `gh rba init --org <org>` writes a minimal `course.env` where you stand. Any command also accepts `--org <org>` to override.
+
+`course.env` is parsed as plain `KEY=value`, never executed — it is meant to be committed, so it must not be able to run anything. Unknown keys are ignored.
 
 ## Roster Format
 
@@ -73,7 +80,9 @@ Blank lines and lines starting with `#` are ignored. The full name is not curren
 gh rba init --org <org>
 ```
 
-Saves the default org for this course directory to `.rba`. Run once when setting up a new course folder.
+Writes a minimal `course.env` in the current directory. Refuses if one already exists, since it may hold roster or template settings this command does not know about — edit it instead.
+
+Prefer cloning your org's `course` repo (see Setup); `init` is for when there is not one.
 
 ---
 
@@ -179,7 +188,7 @@ interrupted run is safe to resume.
 | `--message <msg>` | `Instructor patch: sync from template` | Commit message on student repos |
 | `--dry-run` | off | Run every merge, print outcomes, push nothing |
 | `--yes`, `-y` | off | Skip the confirmation prompt |
-| `--org <org>` | from `.rba` | Override the default org |
+| `--org <org>` | from `course.env` | Override the default org |
 
 **Example output:**
 
@@ -271,7 +280,7 @@ Generated: 2026-06-02 14:30
 ```bash
 # 1. Set up your course directory
 cd ~/courses/202520-EENG-340
-gh rba init --org 202520-EENG-340
+gh rba init --org 202520-EENG-340   # or clone the org's `course` repo here
 
 # 2. Distribute an assignment
 gh rba assignment create \
@@ -301,7 +310,7 @@ Student repos are tagged with two GitHub topics at creation time:
 - `rba-assignment` — marks any repo as belonging to this system
 - `rba-assignment-<name>` — scopes the repo to a specific assignment
 
-`assignment list`, `repos clone`, and `repos report` all use the GitHub search API to find repos by topic, so they work from any machine without any local state beyond `.rba`.
+`assignment list`, `repos clone`, and `repos report` all use the GitHub search API to find repos by topic, so they work from any machine without any local state beyond `course.env`.
 
 ## Limitations
 

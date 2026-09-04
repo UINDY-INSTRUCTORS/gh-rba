@@ -1,8 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.2.0"
-CONFIG_FILE=".rba"
+VERSION="0.3.0"
+
+# Per-course config, read from the CURRENT WORKING DIRECTORY. The intended
+# layout is that each semester's org owns a `course` repo holding this file
+# plus the roster, cloned as the term directory -- so `cd`-ing into a course
+# scopes every command to it. See
+# docs/superpowers/specs/2026-09-03-course-in-the-org-design.md
+CONFIG_FILE="course.env"
+
+# The previous name, still read when course.env is absent. Nothing is known to
+# use it; kept for one release so an existing checkout does not break.
+LEGACY_CONFIG_FILE=".rba"
+
 ORG=""
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -73,12 +84,49 @@ rba_trim() { local v="$1"; v="${v#"${v%%[![:space:]]*}"}"; printf '%s' "${v%"${v
 
 rba_lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
+# Parse KEY=value, rather than `source`.
+#
+# The old implementation shell-sourced this file. That was harmless while no
+# such file existed, but course.env is now designed to be present and committed
+# to a repo other people can write to -- and sourcing it hands anyone with push
+# access code execution on the instructor's machine. Only known keys are read,
+# and only as literal strings.
+rba_config_value() {   # $1 key, $2 file
+  local key="$1" file="$2" line value
+  [[ -f "$file" ]] || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line//$'\r'/}"
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ "$line" =~ ^[[:space:]]*${key}[[:space:]]*= ]] || continue
+    value="${line#*=}"
+    value="$(rba_trim "$value")"
+    # strip one layer of matching quotes
+    if [[ "$value" == \"*\" || "$value" == \'*\' ]]; then
+      value="${value:1:${#value}-2}"
+    fi
+    printf '%s' "$value"
+    return 0
+  done < "$file"
+  return 1
+}
+
 load_config() {
-  if [[ -f "$CONFIG_FILE" ]]; then source "$CONFIG_FILE"; fi
+  local file=""
+  if [[ -f "$CONFIG_FILE" ]]; then
+    file="$CONFIG_FILE"
+  elif [[ -f "$LEGACY_CONFIG_FILE" ]]; then
+    file="$LEGACY_CONFIG_FILE"
+  else
+    return 0
+  fi
+  local v
+  if v="$(rba_config_value ORG "$file")" && [[ -n "$v" ]]; then ORG="$v"; fi
 }
 
 require_org() {
-  [[ -n "$ORG" ]] || die "No org configured. Run 'gh rba init --org <org>' or pass --org <org>"
+  [[ -n "$ORG" ]] || die "No org configured. Pass --org <org>, or run this from a
+directory containing $CONFIG_FILE (clone your org's 'course' repo as the term
+directory), or run 'gh rba init --org <org>' to write one here."
   echo "$ORG"
 }
 
@@ -106,7 +154,18 @@ cmd_init() {
     esac
   done
   [[ -n "$ORG" ]] || die "Usage: gh rba init --org <org>"
-  echo "ORG=$ORG" > "$CONFIG_FILE"
+  if [[ -f "$CONFIG_FILE" ]]; then
+    die "$CONFIG_FILE already exists here. Edit it rather than overwriting -- it
+may hold roster and template settings this command does not know about."
+  fi
+  cat > "$CONFIG_FILE" <<EOF
+# course.env — per-course configuration for \`gh rba\`.
+#
+# This file IS committed. Org and repo names only — never a token or any other
+# secret. Secrets belong in .env, which should stay gitignored.
+
+ORG="$ORG"
+EOF
   info "Initialized: org=$ORG (saved to $CONFIG_FILE)"
 }
 

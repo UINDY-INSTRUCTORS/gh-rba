@@ -1,7 +1,8 @@
 # The course lives in the org — Design
 
 **Date:** 2026-09-03
-**Status:** Draft, for review. Three decisions open (see the end).
+**Status:** Phase 1 implemented (v0.3.0). Decisions 1 and 2 settled: stay in
+bash; `workshop-codespaces` is kept as a backup rather than archived.
 **Supersedes:** `workshop-codespaces/create-workshop-repos.sh`, which this folds
 into `gh rba`.
 
@@ -43,7 +44,7 @@ Each course, each term, is a fresh org, and the org holds everything:
 
 ```
 202610-CSCI-350/                     ← the org IS the semester
-  course-admin/                      ← ONE private repo: this term's details
+  course/                            ← ONE private repo: this term's details
       course.env                     org + naming defaults  (committed)
       roster.txt                     usernames (+ optional ,Full Name)
       teams.txt                      optional, for --teams
@@ -57,8 +58,10 @@ Each course, each term, is a fresh org, and the org holds everything:
 Working on a course is then:
 
 ```bash
-gh repo clone 202610-CSCI-350/course-admin
-cd course-admin
+# clone it AS the term directory, so projs/ and repos/ sit inside it
+git clone git@github.com:202610-CSCI-350/course.git \
+  ~/Development/courses/csci/csci-350/202610
+cd ~/Development/courses/csci/csci-350/202610
 gh rba assignment create --name hw01
 ```
 
@@ -82,12 +85,18 @@ as git itself: the directory tells the tool what you are working on. **`cd` into
 the course, and every command is scoped to that course.**
 
 This is also why the tool needs no new machinery to read the roster over the
-API. The `course-admin` repo is an ordinary repo; clone it and `gh rba` reads
+API. The `course` repo is an ordinary repo; clone it and `gh rba` reads
 its files exactly as it reads local files today. The discipline is entirely in
 *where those files live* — and a clone, unlike an untracked file, has an
 upstream.
 
-### `course.env`, not `.env`, and not `.rba`
+### Naming: the repo is `course`; the file is `course.env`
+
+The repo is **`course`** — short, true, and it sorts away from the
+`act01-*`/`hw01-*` crowd in the org's repo list. Created 2026-09-03 in both
+live orgs. (`course-admin` was the first proposal; `course` reads better once
+the clone *becomes* the term directory.)
+
 
 The config file is **`course.env`** — the name already in use in
 `workshop-codespaces`, moved as-is.
@@ -96,28 +105,30 @@ The config file is **`course.env`** — the name already in use in
 five repos on this machine gitignore it, one holds a real 1 KB secrets file, and
 the standing rule for this account is that a `.gitignore` must cover `.env` and
 `.env.*`. A committed config file named `.env` would be ignored by reflex, by
-template and by tooling, and `course-admin` would ship without the file that
-makes it work — silently. The existing header says exactly why the two names
+template and by tooling, and the repo would ship without the file that
+makes it work — silently. The header written into both repos says exactly why
+the two names
 must stay distinct:
 
 > ⚠️ This file IS committed. Org and repo names only — never put a token or
 > any other secret here. Secrets belong in `.env`, which is gitignored.
 
 Not `.rba` either: it reads as tool-internal rather than as course
-configuration, and `course.env` needs no migration.
+configuration, and `course.env` needs no migration. `.rba` is still read as a
+fallback in v0.3.0, and no file of that name is known to exist anywhere.
 
 ⚠️ **Not `.github`** for the repo itself. That repo has org-level semantics and
 its `profile/README.md` is **public**. A roster is a list of who is enrolled and
 must not sit near public-by-default machinery.
 
-⚠️ **`course-admin` must be private.** Students are outside collaborators on
+⚠️ **`course` must be private.** Students are outside collaborators on
 their own repos and cannot see it — but by configuration, not by luck.
 
 ## Required change: parse, don't source
 
-`load_config` currently does `source "$CONFIG_FILE"`, i.e. shell-executes the
+✅ **Done in v0.3.0.** `load_config` used to `source "$CONFIG_FILE"`, i.e. shell-execute the
 file. Harmless while nothing used it. Once the file is *designed* to be present
-and committed to a shared repo, anyone who can write to `course-admin` — a TA,
+and committed to a shared repo, anyone who can write to `course` — a TA,
 a compromised account — gets code execution on the instructor's machine via
 `ORG=x; curl … | sh`.
 
@@ -132,7 +143,7 @@ on the file.
 ```
 gh rba course init --org <org> --course CSCI-350 --term 202610
 ```
-Creates the **private** `course-admin` repo and seeds `course.env` with the
+Creates the **private** `course` repo and seeds `course.env` with the
 header warning above. Idempotent — safe against an org that already has
 templates and student repos, which both live orgs already do.
 
@@ -171,21 +182,18 @@ exchange the roster gets a history: on 2026-09-03 three names differed from what
 students wrote down — a rename, a replacement account, and a hyphen — and that
 knowledge survived only in a chat log.
 
-**`gh-rba`'s own `.gitignore` still lists `.rba`** as "local course config, not
-part of the extension". Harmless, but it now states the opposite of the
-convention; update the comment when `CONFIG_FILE` changes.
+✅ **`gh-rba`'s own `.gitignore`** now ignores `course.env` as well, so a course
+directory used for testing cannot leak into the extension's own history.
 
 ## Open decisions
 
-**1. Does this stay bash?** `FUTURE.md` names "config beyond a single `ORG=`
-line" as a Python-rewrite trigger. `course.env` stays `KEY=value`, so the
-trigger fires only in the weakest sense, and the other conditions (pagination,
-Windows) are still unmet. *Recommendation: stay in bash. Mid-term is the wrong
-time to rewrite a tool in daily use.*
+✅ **1. Stay in bash.** Settled 2026-09-04. `course.env` remains `KEY=value`, so
+the `FUTURE.md` trigger fires only weakly, and pagination and Windows support
+are still unmet.
 
-**2. What happens to `workshop-codespaces`?** After this, nothing is left in it
-but the SLICE 2026 workshop material it was originally recovered from. Archive
-it, or let it revert to being only that.
+✅ **2. `workshop-codespaces` stays**, kept as a fallback rather than archived.
+Its rosters are now second copies of the ones in each org's `course` repo and
+should be marked superseded.
 
 **3. Migration for the two live orgs.** `202610-CSCI-350` and `202610-SWEN-200`
 already hold templates and student repos, and their rosters exist in
@@ -193,7 +201,7 @@ already hold templates and student repos, and their rosters exist in
 
 ## Phases
 
-- [ ] **1. `course.env` + parse-not-source.** Rename `CONFIG_FILE`, replace
+- [x] **1. `course.env` + parse-not-source.** — done 2026-09-04, v0.3.0. Rename `CONFIG_FILE`, replace
       `source` with an explicit `KEY=value` reader accepting known keys only,
       keep `.rba` working as a fallback for one release. Tests for both.
 - [ ] **2. `course init`.** Creates the private repo, seeds `course.env`,

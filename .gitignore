@@ -1,4 +1,9 @@
-# Local course config — contains org name, not part of the extension
+# Per-course config. Normally this lives in the org's `course` repo and is
+# committed THERE; it is ignored here so a course directory used for testing
+# does not leak into the extension's own history.
+course.env
+
+# The former name of the same file, still read as a fallback.
 .rba
 
 # Generated grading reports
