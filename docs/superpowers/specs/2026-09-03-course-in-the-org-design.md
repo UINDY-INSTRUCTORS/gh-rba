@@ -206,7 +206,11 @@ already hold templates and student repos, and their rosters exist in
       keep `.rba` working as a fallback for one release. Tests for both.
 - [ ] **2. `course init`.** Creates the private repo, seeds `course.env`,
       imports an existing roster. Idempotent against a populated org.
-- [ ] **3. Guards into `assignment create`**, and defaults resolved from
+- [~] **3. Guards into `assignment create`** — the username guard landed
+      2026-09-04 in v0.4.0 (`rba_lookup_user`, three-way outcome, rename
+      reporting). Still to do: default `--template` and `--students` from
+      `course.env`, report the template's last push, and print the per-repo
+      invite-pending summary., and defaults resolved from
       `course.env`. Retire `create-workshop-repos.sh`.
 
 Per this repo's existing practice, each phase lands with tests in `tests/`.

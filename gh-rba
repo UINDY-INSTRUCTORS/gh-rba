@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.3.0"
+VERSION="0.4.0"
 
 # Per-course config, read from the CURRENT WORKING DIRECTORY. The intended
 # layout is that each semester's org owns a `course` repo holding this file
@@ -20,6 +20,7 @@ ORG=""
 
 die()  { echo "Error: $*" >&2; exit 1; }
 info() { echo "→ $*"; }
+warn() { echo "⚠ $*" >&2; }
 
 # Compare a git version string against the 2.38 floor required by
 # `git merge-tree --write-tree --merge-base`. Numeric compare per component —
@@ -144,6 +145,30 @@ read_roster() {
   done < "$file"
 }
 
+# Look one GitHub user up, and say WHICH kind of failure occurred.
+#   0 -> exists; the canonical login is printed on stdout
+#   1 -> definitively does not exist (a real 404)
+#   2 -> could not tell (rate limit, network, transient 5xx)
+#
+# The distinction matters. Treating every non-zero exit as "no such user" means
+# one transient blip in the middle of a 36-name roster aborts the run and sends
+# the instructor off to correct a roster that was already right. That happened
+# on 2026-09-03 with a username that exists. A fan-out is ~40 API calls in a
+# burst, which is where GitHub's secondary rate limiter lives.
+rba_lookup_user() {
+  local u="$1" out rc attempt
+  for attempt in 1 2 3; do
+    out="$(gh api "users/$u" --jq .login 2>&1)"; rc=$?
+    if [[ "$rc" -eq 0 ]]; then printf '%s' "$out"; return 0; fi
+    case "$out" in
+      *"Not Found"*|*404*) return 1 ;;
+      *) sleep $(( attempt * 2 )) ;;
+    esac
+  done
+  printf '%s' "$out"
+  return 2
+}
+
 # ── Commands ──────────────────────────────────────────────────────────────────
 
 cmd_init() {
@@ -233,16 +258,34 @@ cmd_assignment_create() {
   # A typo otherwise leaves a repo standing with a collaborator missing, which
   # is harder to notice than an outright failure.
   info "Validating GitHub usernames"
-  local bad=""
+  local bad="" unresolved="" renamed="" canonical
   local all_users
   all_users=$(cut -f2 "$worklist" | tr ' ' '\n' | sort -u)
   while IFS= read -r u; do
     [[ -z "$u" ]] && continue
-    gh api "users/$u" --jq .login >/dev/null 2>&1 || bad+="$u "
+    canonical="$(rba_lookup_user "$u")"
+    case $? in
+      0) [[ "$canonical" != "$u" ]] && renamed+="$u -> $canonical; " ;;
+      1) bad+="$u " ;;
+      2) unresolved+="$u " ;;
+    esac
   done <<< "$all_users"
+  if [[ -n "$unresolved" ]]; then
+    rm -f "$worklist"
+    die "Could not check these usernames: ${unresolved% }
+This is NOT 'they do not exist' -- the lookup itself failed, most likely a
+secondary rate limit. Wait a minute and re-run; nothing has been created."
+  fi
   if [[ -n "$bad" ]]; then
     rm -f "$worklist"
     die "These usernames do not exist on GitHub: ${bad% }"
+  fi
+  if [[ -n "$renamed" ]]; then
+    # GitHub answers under an account's CURRENT name, so a mismatch means the
+    # student renamed. Repos are still created under the roster spelling, which
+    # works, but the roster should be corrected before the next lookup 404s.
+    warn "Renamed account(s): ${renamed%; }"
+    warn "Repos will use the roster spelling. Update the roster when convenient."
   fi
   info "  all $(printf '%s\n' "$all_users" | grep -c .) usernames valid"
 
