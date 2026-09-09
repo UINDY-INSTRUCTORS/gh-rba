@@ -111,6 +111,35 @@ rba_config_value() {   # $1 key, $2 file
   return 1
 }
 
+# Resolve an assignment's template repo.
+#
+# Precedence: an explicit --template, then a TEMPLATE_<name> entry in
+# course.env, then the <name>-template convention.
+#
+# The overrides exist because act01 and hw01 were named before the convention
+# settled, and their student repos record the old names in
+# template_repository.full_name -- which `assignment patch` matches on, so the
+# repos cannot simply be renamed. Before this function the entries sat in
+# course.env being read by nobody, documenting behaviour the tool did not have.
+#
+# A bare value is taken as a repo in the current org; a value containing "/" is
+# used as a full owner/repo, so a template can live in another org.
+rba_template_for() {   # $1 assignment name, $2 org
+  local name="$1" org="$2" file="" v
+  if   [[ -f "$CONFIG_FILE"        ]]; then file="$CONFIG_FILE"
+  elif [[ -f "$LEGACY_CONFIG_FILE" ]]; then file="$LEGACY_CONFIG_FILE"
+  fi
+  if [[ -n "$file" ]] && v="$(rba_config_value "TEMPLATE_${name}" "$file")" \
+     && [[ -n "$v" ]]; then
+    case "$v" in
+      */*) printf '%s' "$v" ;;
+      *)   printf '%s/%s' "$org" "$v" ;;
+    esac
+    return 0
+  fi
+  printf '%s/%s-template' "$org" "$name"
+}
+
 load_config() {
   local file=""
   if [[ -f "$CONFIG_FILE" ]]; then
@@ -209,7 +238,7 @@ cmd_assignment_create() {
   done
 
   [[ -n "$name"     ]] || die "Usage: gh rba assignment create --name <name> --template <org/repo> (--students <file> | --teams <file>)"
-  [[ -n "$template" ]] || die "--template <org/repo> is required"
+
   [[ -n "$students_file" || -n "$teams_file" ]] \
     || die "one of --students <file> or --teams <file> is required"
   [[ -n "$students_file" && -n "$teams_file" ]] \
@@ -217,6 +246,7 @@ cmd_assignment_create() {
 
   local org
   org=$(require_org)
+  [[ -n "$template" ]] || template="$(rba_template_for "$name" "$org")"
 
   # Verify the template repo exists and has "Template repository" enabled
   local is_template
@@ -496,7 +526,7 @@ cmd_assignment_patch() {
 
   local org
   org=$(require_org)
-  [[ -n "$template" ]] || template="${org}/${name}-template"
+  [[ -n "$template" ]] || template="$(rba_template_for "$name" "$org")"
 
   # One API call for everything needed about the template. Keep gh's own error
   # text: "not found", "rate limit exceeded", "SAML enforcement" and "bad
