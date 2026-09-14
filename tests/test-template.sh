@@ -41,6 +41,21 @@ check "a value containing / keeps its own org" \
 check "the org argument is what gets prefixed" \
       "another/hw01-lexer-template" "$(rba_template_for hw01 another)"
 
+# Assignment names have dashes; config keys are conventionally underscored.
+# Every entry written by hand so far uses the underscore form, and the lookup
+# only ever tried the dashed one -- so TEMPLATE_icp_1 sat there being ignored.
+cat >> course.env <<'CFG'
+TEMPLATE_icp_3="icp-3-template-custom"
+TEMPLATE_lab-4="lab-4-template-custom"
+CFG
+
+check "an underscored key matches a dashed assignment name" \
+      "myorg/icp-3-template-custom" "$(rba_template_for icp-3 myorg)"
+check "a dashed key still matches, unchanged" \
+      "myorg/lab-4-template-custom" "$(rba_template_for lab-4 myorg)"
+check "a name with no dash is unaffected" \
+      "myorg/hw02-template" "$(rba_template_for hw02 myorg)"
+
 printf '# TEMPLATE_commented="nope"\n' >> course.env
 check "a commented-out override is ignored" \
       "myorg/commented-template" "$(rba_template_for commented myorg)"
@@ -55,5 +70,5 @@ printf 'TEMPLATE_legacy="legacy-tpl"\n' > .rba
 check "the legacy .rba file is read too" \
       "myorg/legacy-tpl" "$(rba_template_for legacy myorg)"
 
-if (( FAILS == 0 )); then echo "test-template-resolve: PASS"
-else echo "test-template-resolve: $FAILS FAILURE(S)"; exit 1; fi
+if (( FAILS == 0 )); then echo "test-template: PASS"
+else echo "test-template: $FAILS FAILURE(S)"; exit 1; fi

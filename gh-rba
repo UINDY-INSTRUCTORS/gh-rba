@@ -15,6 +15,7 @@ CONFIG_FILE="course.env"
 LEGACY_CONFIG_FILE=".rba"
 
 ORG=""
+ROSTER=""
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -111,6 +112,15 @@ rba_config_value() {   # $1 key, $2 file
   return 1
 }
 
+# The config file in effect here, if any: course.env, else the legacy .rba.
+# Three call sites used to inline this if/elif; they drifted apart once.
+rba_config_file() {
+  if   [[ -f "$CONFIG_FILE"        ]]; then printf '%s' "$CONFIG_FILE"
+  elif [[ -f "$LEGACY_CONFIG_FILE" ]]; then printf '%s' "$LEGACY_CONFIG_FILE"
+  else return 1
+  fi
+}
+
 # Resolve an assignment's template repo.
 #
 # Precedence: an explicit --template, then a TEMPLATE_<name> entry in
@@ -125,32 +135,31 @@ rba_config_value() {   # $1 key, $2 file
 # A bare value is taken as a repo in the current org; a value containing "/" is
 # used as a full owner/repo, so a template can live in another org.
 rba_template_for() {   # $1 assignment name, $2 org
-  local name="$1" org="$2" file="" v
-  if   [[ -f "$CONFIG_FILE"        ]]; then file="$CONFIG_FILE"
-  elif [[ -f "$LEGACY_CONFIG_FILE" ]]; then file="$LEGACY_CONFIG_FILE"
-  fi
-  if [[ -n "$file" ]] && v="$(rba_config_value "TEMPLATE_${name}" "$file")" \
-     && [[ -n "$v" ]]; then
-    case "$v" in
-      */*) printf '%s' "$v" ;;
-      *)   printf '%s/%s' "$org" "$v" ;;
-    esac
-    return 0
+  local name="$1" org="$2" file="" v key
+  file="$(rba_config_file)" || file=""
+  if [[ -n "$file" ]]; then
+    # Assignment names carry dashes (icp-3); shell-style config keys are
+    # conventionally underscored (TEMPLATE_icp_3), and every entry written so
+    # far uses the underscored form. Accept both rather than make the author
+    # guess which one the tool wants.
+    for key in "TEMPLATE_${name}" "TEMPLATE_${name//-/_}"; do
+      if v="$(rba_config_value "$key" "$file")" && [[ -n "$v" ]]; then
+        case "$v" in
+          */*) printf '%s' "$v" ;;
+          *)   printf '%s/%s' "$org" "$v" ;;
+        esac
+        return 0
+      fi
+    done
   fi
   printf '%s/%s-template' "$org" "$name"
 }
 
 load_config() {
-  local file=""
-  if [[ -f "$CONFIG_FILE" ]]; then
-    file="$CONFIG_FILE"
-  elif [[ -f "$LEGACY_CONFIG_FILE" ]]; then
-    file="$LEGACY_CONFIG_FILE"
-  else
-    return 0
-  fi
-  local v
-  if v="$(rba_config_value ORG "$file")" && [[ -n "$v" ]]; then ORG="$v"; fi
+  local file v
+  file="$(rba_config_file)" || return 0
+  if v="$(rba_config_value ORG    "$file")" && [[ -n "$v" ]]; then ORG="$v"; fi
+  if v="$(rba_config_value ROSTER "$file")" && [[ -n "$v" ]]; then ROSTER="$v"; fi
 }
 
 require_org() {
@@ -219,6 +228,9 @@ may hold roster and template settings this command does not know about."
 # secret. Secrets belong in .env, which should stay gitignored.
 
 ORG="$ORG"
+
+# Used when neither --students nor --teams is passed.
+ROSTER="roster.txt"
 EOF
   info "Initialized: org=$ORG (saved to $CONFIG_FILE)"
 }
@@ -237,7 +249,20 @@ cmd_assignment_create() {
     esac
   done
 
-  [[ -n "$name"     ]] || die "Usage: gh rba assignment create --name <name> --template <org/repo> (--students <file> | --teams <file>)"
+  [[ -n "$name"     ]] || die "Usage: gh rba assignment create --name <name> [--template <org/repo>] [--students <file> | --teams <file>]"
+
+  # ROSTER in course.env has been documented since v0.3.0 and read by nobody,
+  # so the one flag you could not omit was the one the config implied you
+  # could. It is a default, not an override: --students and --teams both win,
+  # and it stays out of the way of --teams entirely.
+  if [[ -z "$students_file" && -z "$teams_file" && -n "$ROSTER" ]]; then
+    [[ -f "$ROSTER" ]] || die "ROSTER in $(rba_config_file) names '$ROSTER', which does not exist here.
+Fix the config, or pass --students <file>."
+    students_file="$ROSTER"
+    # Say so. A silent default that picks individual repos over team repos is
+    # exactly the mistake this should not make quietly.
+    info "Using ROSTER from $(rba_config_file): $students_file"
+  fi
 
   [[ -n "$students_file" || -n "$teams_file" ]] \
     || die "one of --students <file> or --teams <file> is required"
@@ -775,7 +800,7 @@ gh-rba v${VERSION} — R.B. Annis School of Engineering GitHub Tools
 
 USAGE
   gh rba init --org <org>
-  gh rba assignment create --name <name> --template <org/repo> (--students <file> | --teams <file>) [--org <org>]
+  gh rba assignment create --name <name> [--template <org/repo>] [--students <file> | --teams <file>] [--org <org>]
   gh rba assignment list [--org <org>]
   gh rba assignment patch <assignment-name> [--template <org/repo>] [--message <msg>] [--dry-run] [--yes|-y] [--org <org>]
   gh rba repos clone <assignment-name> [--org <org>]
@@ -784,6 +809,13 @@ USAGE
 CONFIG
   Run 'gh rba init --org <org>' in your course directory to save a default org.
   All commands accept --org to override the default.
+
+  course.env may also set, and these are what let the command be short:
+    ROSTER="roster.txt"          used when neither --students nor --teams is given
+    TEMPLATE_<name>="repo"       overrides the <name>-template convention;
+                                 TEMPLATE_icp_3 and TEMPLATE_icp-3 both work
+  With ORG and ROSTER set, distributing an assignment whose template follows
+  the convention is just:  gh rba assignment create --name icp-3
 
 ROSTER FORMAT
   --students : one GitHub username per line, or CSV (username,Full Name).

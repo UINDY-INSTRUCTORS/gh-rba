@@ -97,6 +97,28 @@ check "command substitution not evaluated" "absent" \
 check "substitution kept as a literal" '$(touch ./PWNED2)injected' "$got"
 
 cd "$HERE"
+# ── ROSTER ────────────────────────────────────────────────────────────────
+# Declared in course.env since v0.3.0 and read by nobody until v0.4.1, which
+# made --students the one flag the config implied you could omit but couldn't.
+rm -f course.env .rba
+ORG=""; ROSTER=""
+printf 'ORG="o"\nROSTER="roster.txt"\n' > course.env
+load_config
+check "load_config reads ROSTER"      "roster.txt" "$ROSTER"
+check "load_config still reads ORG"   "o"          "$ORG"
+
+ORG=""; ROSTER=""
+printf 'ORG="o"\n' > course.env
+load_config
+check "ROSTER absent leaves it empty" ""           "$ROSTER"
+
+ORG=""; ROSTER=""
+rm -f course.env
+printf 'ROSTER="from-legacy.txt"\n' > .rba
+load_config
+check "legacy .rba supplies ROSTER too" "from-legacy.txt" "$ROSTER"
+rm -f .rba
+
 if (( FAILS == 0 )); then
   echo "test-config: PASS"
 else
