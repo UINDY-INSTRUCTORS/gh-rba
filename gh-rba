@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.4.0"
+VERSION="0.4.1"
 
 # Per-course config, read from the CURRENT WORKING DIRECTORY. The intended
 # layout is that each semester's org owns a `course` repo holding this file
@@ -708,12 +708,24 @@ cmd_assignment_patch() {
 
 cmd_repos_clone() {
   load_config
-  [[ $# -gt 0 ]] || die "Usage: gh rba repos clone <assignment-name> [--org <org>]"
+  [[ $# -gt 0 ]] || die "Usage: gh rba repos clone <assignment-name> [--into <dir>] [--org <org>]"
   local assignment_name="$1"; shift
+  local into=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --org) ORG="$2"; shift 2 ;;
+      # --into names the directory the per-student directories go INTO, exactly
+      # as given. It is not a parent that the assignment name is appended to:
+      # `--into repos/hw02` yields repos/hw02/<user>, and `--into repos` yields
+      # repos/<user>. The assignment name stays what it has always been -- the
+      # topic that finds the repos -- because passing a path there searches for
+      # a topic containing a slash and silently finds nothing.
+      --into)
+        [[ $# -ge 2 ]] || die "--into needs a directory"
+        into="$2"; shift 2 ;;
+      --org)
+        [[ $# -ge 2 ]] || die "--org needs an org"
+        ORG="$2"; shift 2 ;;
       *) die "Unknown option: $1" ;;
     esac
   done
@@ -728,13 +740,14 @@ cmd_repos_clone() {
 
   [[ -n "$repos" ]] || die "No repos found for assignment '$assignment_name' in org '$org'"
 
-  mkdir -p "$assignment_name"
-  info "Cloning into ./$assignment_name/"
+  local dest="${into:-$assignment_name}"
+  mkdir -p "$dest"
+  info "Cloning into ${dest%/}/"
 
   while IFS= read -r full_name; do
     local repo_name="${full_name#*/}"
     local username="${repo_name#"${assignment_name}-"}"
-    local clone_dir="${assignment_name}/${username}"
+    local clone_dir="${dest%/}/${username}"
 
     if [[ -d "$clone_dir" ]]; then
       echo "  skipping $username (already cloned)"

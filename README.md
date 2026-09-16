@@ -230,10 +230,17 @@ Requires git >= 2.38.
 ### `gh rba repos clone`
 
 ```
-gh rba repos clone <assignment-name> [--org <org>]
+gh rba repos clone <assignment-name> [--into <dir>] [--org <org>]
 ```
 
-Clones all student repos for an assignment into `./<assignment-name>/<username>/`. Skips repos that are already cloned.
+Clones all student repos for an assignment into `./<assignment-name>/<username>/`. Skips repos that are already cloned, so re-running after a late submission is safe and will not touch your local edits.
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--into` | Directory to clone into, instead of `./<assignment-name>/`. Used exactly as given — see below. |
+| `--org` | Override the default org. |
 
 **Example:**
 
@@ -249,6 +256,24 @@ lab1/
   mjones99/
   alee2026/
 ```
+
+**`--into` is the destination, not a parent.** The per-student directories are
+created directly inside it:
+
+```bash
+gh rba repos clone lab1 --into repos/lab1   # -> repos/lab1/jsmith42/
+gh rba repos clone lab1 --into repos        # -> repos/jsmith42/
+```
+
+⚠️ **Do not pass a path as the assignment name.** `gh rba repos clone repos/lab1`
+does not work: the assignment name is the *topic* used to find the repos
+(`rba-assignment-lab1`), and GitHub topics cannot contain `/`, so the search
+matches nothing and the command stops before it would have created any
+directory. That is what `--into` is for.
+
+ℹ️ Note that `course.env` is read from the **current** directory, so `cd`-ing
+into a subdirectory to control where repos land loses your `ORG`. Staying in the
+term directory and using `--into` avoids that.
 
 ---
 
