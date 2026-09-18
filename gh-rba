@@ -155,6 +155,22 @@ rba_template_for() {   # $1 assignment name, $2 org
   printf '%s/%s-template' "$org" "$name"
 }
 
+# Where the template name came from. Display only -- rba_template_for decides.
+# Kept separate so that function, which is covered by tests, stays untouched.
+rba_template_origin() {   # $1 assignment name
+  local name="$1" file="" v key
+  file="$(rba_config_file)" || file=""
+  if [[ -n "$file" ]]; then
+    for key in "TEMPLATE_${name}" "TEMPLATE_${name//-/_}"; do
+      if v="$(rba_config_value "$key" "$file")" && [[ -n "$v" ]]; then
+        printf '%s in %s' "$key" "$file"
+        return 0
+      fi
+    done
+  fi
+  printf '<name>-template convention'
+}
+
 load_config() {
   local file v
   file="$(rba_config_file)" || return 0
@@ -238,18 +254,24 @@ EOF
 cmd_assignment_create() {
   load_config
   local name="" template="" students_file="" teams_file=""
+  local assume_yes=false
+  # Provenance, for the plan shown before anything is created. A value that came
+  # from a convention or a config file is exactly the kind that is wrong without
+  # looking wrong, so the plan says where each one came from.
+  local template_src="" org_src="" roster_src=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --name)     name="$2";          shift 2 ;;
-      --template) template="$2";      shift 2 ;;
-      --students) students_file="$2"; shift 2 ;;
-      --teams)    teams_file="$2";    shift 2 ;;
-      --org)      ORG="$2";           shift 2 ;;
+      --template) template="$2"; template_src="--template"; shift 2 ;;
+      --students) students_file="$2"; roster_src="--students"; shift 2 ;;
+      --teams)    teams_file="$2";    roster_src="--teams";    shift 2 ;;
+      --org)      ORG="$2";           org_src="--org";        shift 2 ;;
+      --yes|-y)   assume_yes=true;    shift ;;
       *) die "Unknown option: $1" ;;
     esac
   done
 
-  [[ -n "$name"     ]] || die "Usage: gh rba assignment create --name <name> [--template <org/repo>] [--students <file> | --teams <file>]"
+  [[ -n "$name"     ]] || die "Usage: gh rba assignment create --name <name> [--template <org/repo>] [--students <file> | --teams <file>] [--yes|-y]"
 
   # ROSTER in course.env has been documented since v0.3.0 and read by nobody,
   # so the one flag you could not omit was the one the config implied you
@@ -259,6 +281,7 @@ cmd_assignment_create() {
     [[ -f "$ROSTER" ]] || die "ROSTER in $(rba_config_file) names '$ROSTER', which does not exist here.
 Fix the config, or pass --students <file>."
     students_file="$ROSTER"
+    roster_src="ROSTER in $(rba_config_file)"
     # Say so. A silent default that picks individual repos over team repos is
     # exactly the mistake this should not make quietly.
     info "Using ROSTER from $(rba_config_file): $students_file"
@@ -271,7 +294,11 @@ Fix the config, or pass --students <file>."
 
   local org
   org=$(require_org)
-  [[ -n "$template" ]] || template="$(rba_template_for "$name" "$org")"
+  [[ -n "$org_src" ]] || org_src="ORG in $(rba_config_file)"
+  if [[ -z "$template" ]]; then
+    template="$(rba_template_for "$name" "$org")"
+    template_src="$(rba_template_origin "$name")"
+  fi
 
   # Verify the template repo exists and has "Template repository" enabled
   local is_template
@@ -308,6 +335,36 @@ Fix the config, or pass --students <file>."
   fi
 
   [[ -s "$worklist" ]] || { rm -f "$worklist"; die "No entries found in the roster."; }
+
+  # ── Show the plan, and get a yes ─────────────────────────────────────────
+  # Placed before username validation so a wrong template or a stale roster is
+  # caught without first waiting on one API lookup per student.
+  local count first mode
+  count=$(wc -l < "$worklist" | tr -d ' ')
+  mode=$([[ -n "$teams_file" ]] && echo "teams — one repo per team" \
+                                || echo "individual — one repo per student")
+  first=$(cut -f1 "$worklist" | head -3 | sed "s|^|${name}-|" \
+          | awk '{printf "%s%s", sep, $0; sep=", "}')
+  [[ "$count" -gt 3 ]] && first+=", …"
+
+  echo
+  echo "About to create assignment '$name':"
+  printf '  %-10s %s\n' "org"      "$org  ($org_src)"
+  printf '  %-10s %s\n' "template" "$template  ($template_src)"
+  printf '  %-10s %s\n' "roster"   "${students_file:-$teams_file}  ($roster_src)"
+  printf '  %-10s %s\n' "mode"     "$mode"
+  printf '  %-10s %s\n' "repos"    "$count private repo(s): $first"
+  printf '  %-10s %s\n' "access"   "every member added with write access"
+  echo
+
+  if [[ "$assume_yes" != "true" ]]; then
+    if [[ ! -t 0 ]]; then
+      die "Refusing to create $count repos without confirmation. Pass --yes to proceed non-interactively."
+    fi
+    printf 'Does that all look good? [y/N] '
+    local reply; read -r reply
+    [[ "$reply" == "y" || "$reply" == "Y" ]] || die "Aborted. Nothing was created."
+  fi
 
   # ── Validate every username BEFORE creating anything ─────────────────────
   # A typo otherwise leaves a repo standing with a collaborator missing, which
@@ -813,7 +870,7 @@ gh-rba v${VERSION} — R.B. Annis School of Engineering GitHub Tools
 
 USAGE
   gh rba init --org <org>
-  gh rba assignment create --name <name> [--template <org/repo>] [--students <file> | --teams <file>] [--org <org>]
+  gh rba assignment create --name <name> [--template <org/repo>] [--students <file> | --teams <file>] [--yes|-y] [--org <org>]
   gh rba assignment list [--org <org>]
   gh rba assignment patch <assignment-name> [--template <org/repo>] [--message <msg>] [--dry-run] [--yes|-y] [--org <org>]
   gh rba repos clone <assignment-name> [--org <org>]
